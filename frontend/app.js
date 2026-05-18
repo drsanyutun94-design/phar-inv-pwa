@@ -738,7 +738,20 @@ document.addEventListener('DOMContentLoaded', function() {
             // Fetch data from Google Sheets
             const response = await fetch('/api/stock');
             if (!response.ok) {
-                throw new Error('Failed to fetch data from server');
+                let errorMessage = 'Failed to fetch data from server';
+                try {
+                    const errorData = await response.json();
+                    if (errorData.details) {
+                        errorMessage += `: ${errorData.details}`;
+                    } else if (errorData.error) {
+                        errorMessage += `: ${errorData.error}`;
+                    }
+                } catch (e) {
+                    // Fallback to status text if JSON parsing fails
+                    errorMessage += `: ${response.statusText}`;
+                }
+                console.error('Sync Error:', errorMessage);
+                throw new Error(errorMessage);
             }
             const data = await response.json();
 
@@ -776,7 +789,18 @@ document.addEventListener('DOMContentLoaded', function() {
         // Fetch low stock data from Google Sheets
         const response = await fetch('/api/lowstock');
         if (!response.ok) {
-            throw new Error('Failed to fetch low stock data from server');
+            let errorMessage = 'Failed to fetch low stock data from server';
+            try {
+                const errorData = await response.json();
+                if (errorData.details) {
+                    errorMessage += `: ${errorData.details}`;
+                } else if (errorData.error) {
+                    errorMessage += `: ${errorData.error}`;
+                }
+            } catch (e) {
+                errorMessage += `: ${response.statusText}`;
+            }
+            throw new Error(errorMessage);
         }
         const data = await response.json();
 
@@ -813,7 +837,18 @@ document.addEventListener('DOMContentLoaded', function() {
         // Fetch expired date data from Google Sheets
         const response = await fetch('/api/expireddate');
         if (!response.ok) {
-            throw new Error('Failed to fetch expired date data from server');
+            let errorMessage = 'Failed to fetch expired date data from server';
+            try {
+                const errorData = await response.json();
+                if (errorData.details) {
+                    errorMessage += `: ${errorData.details}`;
+                } else if (errorData.error) {
+                    errorMessage += `: ${errorData.error}`;
+                }
+            } catch (e) {
+                errorMessage += `: ${response.statusText}`;
+            }
+            throw new Error(errorMessage);
         }
         const data = await response.json();
 
@@ -919,7 +954,18 @@ document.addEventListener('DOMContentLoaded', function() {
             // Fetch all purchases from Google Sheets
             const response = await fetch('/api/purchases');
             if (!response.ok) {
-                console.error('Error fetching purchases from Google Sheets:', response.statusText);
+                let errorMessage = 'Error fetching purchases from Google Sheets';
+                try {
+                    const errorData = await response.json();
+                    if (errorData.details) {
+                        errorMessage += `: ${errorData.details}`;
+                    } else if (errorData.error) {
+                        errorMessage += `: ${errorData.error}`;
+                    }
+                } catch (e) {
+                    errorMessage += `: ${response.statusText}`;
+                }
+                console.error(errorMessage);
                 return;
             }
             

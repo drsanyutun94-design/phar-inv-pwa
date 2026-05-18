@@ -7,6 +7,15 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Validate environment variables
+const requiredEnvVars = ['GOOGLE_SHEET_ID', 'GOOGLE_CLIENT_EMAIL', 'GOOGLE_PRIVATE_KEY'];
+const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+
+if (missingEnvVars.length > 0) {
+  console.error('CRITICAL: Missing required environment variables:', missingEnvVars.join(', '));
+  console.error('Please ensure these are set in your .env file or hosting environment (e.g., Render Dashboard).');
+}
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -32,16 +41,58 @@ app.use(express.static(path.join(__dirname, '../frontend')));
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 const SPREADSHEET_ID = process.env.GOOGLE_SHEET_ID; // Spreadsheet ID from environment
 
+// Helper to format private key correctly
+function formatPrivateKey(key) {
+  if (!key) return undefined;
+  // Remove any surrounding quotes that might have been added by environment configuration
+  let formattedKey = key.trim();
+  if (formattedKey.startsWith('"') && formattedKey.endsWith('"')) {
+    formattedKey = formattedKey.substring(1, formattedKey.length - 1);
+  }
+  // Replace literal \n with actual newlines
+  return formattedKey.replace(/\\n/g, '\n');
+}
+
 // Authenticate using service account
 const auth = new google.auth.GoogleAuth({
   credentials: {
     client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    private_key: formatPrivateKey(process.env.GOOGLE_PRIVATE_KEY),
   },
   scopes: SCOPES,
 });
 
 const sheets = google.sheets({ version: 'v4', auth });
+
+// Health check endpoint to verify Google Sheets connectivity
+app.get('/api/health', async (req, res) => {
+  try {
+    if (missingEnvVars.length > 0) {
+      return res.status(500).json({ 
+        status: 'error', 
+        message: 'Missing environment variables', 
+        missing: missingEnvVars 
+      });
+    }
+
+    // Try to get spreadsheet metadata to verify connection
+    await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+    
+    res.json({ 
+      status: 'ok', 
+      message: 'Connected to Google Sheets successfully',
+      spreadsheetId: SPREADSHEET_ID 
+    });
+  } catch (error) {
+    console.error('Health check failed:', error);
+    res.status(500).json({ 
+      status: 'error', 
+      message: 'Failed to connect to Google Sheets', 
+      details: error.message,
+      code: error.code
+    });
+  }
+});
 
 // Helper function to get sheet ID by name
 async function getSheetId(sheetName) {
@@ -78,7 +129,7 @@ app.get('/api/items', async (req, res) => {
     res.json(items);
   } catch (error) {
     console.error('Error fetching items:', error);
-    res.status(500).json({ error: 'Failed to fetch items' });
+    res.status(500).json({ error: 'Failed to fetch items', details: error.message });
   }
 });
 
@@ -110,7 +161,7 @@ app.get('/api/items/search/:query', async (req, res) => {
     res.json(filteredItems);
   } catch (error) {
     console.error('Error searching items:', error);
-    res.status(500).json({ error: 'Failed to search items' });
+    res.status(500).json({ error: 'Failed to search items', details: error.message });
   }
 });
 
@@ -189,7 +240,7 @@ app.get('/api/purchases', async (req, res) => {
     res.json(purchases);
   } catch (error) {
     console.error('Error fetching purchases:', error);
-    res.status(500).json({ error: 'Failed to fetch purchases' });
+    res.status(500).json({ error: 'Failed to fetch purchases', details: error.message });
   }
 });
 

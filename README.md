@@ -45,10 +45,12 @@ npm install
 
 1. Create a Google Spreadsheet with the following sheets:
    - `item list` (columns: A=Item Code, B=Item Name, C=Unit)
-   - `daily in` (columns: A=Purchase Date, B=Item Code, C=Item Name, D=Total Price, E=Units per Pack, F=Cards per Box, G=Number of Boxes, H=Expiry Date)
-   - `Inventory stock` (columns: A=Date, B=Item Code, C=Item Name, D=Main Store Quantity, E=Sub Store Quantity)
+   - `daily in` (columns: A=Transaction ID, B=Purchase Date, C=Supplier, D=Item Code, E=Item Name, F=Total Price, G=Units per Card, H=Cards per Box, I=Number of Boxes, J=Expiry Date, K=Payment1 Amount, L=Payment1 Type, M=Payment2 Amount, N=Payment2 Type, O=Payment3 Amount, P=Payment3 Type)
+   - `Inventory stock` (columns: A=Item Code, B=Item Name, C=Main Store Quantity, D=Sub Store Quantity, E=Unit)
    - `Transfer` (columns: A=Date, B=Item Code, C=Item Name, D=Quantity, E=Direction)
-   - `Expired Date` (columns: A=Item Code, B=Item Name, C=Expiry Date)
+   - `Expired Date` (columns: A=Item Code, B=Item Name, C=Expiry Date) - Used for adding expiries
+   - `Exp list` (columns: A=Medicine name, B=Expired date, C=Current stock) - Used for dashboard summary
+   - `Low stock` (columns: A=Medicine name, B=Current stock, C=(Empty), D=Items sold within last 30 days)
 
 2. Create a Google Cloud Project and enable the Google Sheets API
 
