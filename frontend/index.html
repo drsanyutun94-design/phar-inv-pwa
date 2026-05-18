@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pharma Inventory Manager</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+</head>
+<body>
+    <div id="app">
+        <!-- Main content will be loaded dynamically -->
+        <div id="main-content">
+            <h1>Pharma Inventory Manager</h1>
+            <p>Loading...</p>
+        </div>
+        
+        <!-- Bottom Navigation -->
+        <nav class="bottom-nav">
+            <a href="#" class="nav-item active" data-tab="dashboard">
+                <i class="material-icons">dashboard</i>
+                <span>Dashboard</span>
+            </a>
+            <a href="#" class="nav-item" data-tab="search">
+                <i class="material-icons">search</i>
+                <span>Search</span>
+            </a>
+            <a href="#" class="nav-item" data-tab="add">
+                <i class="material-icons">add_circle</i>
+                <span>Add</span>
+            </a>
+            <a href="#" class="nav-item" data-tab="transfer">
+                <i class="material-icons">swap_horiz</i>
+                <span>Transfer</span>
+            </a>
+            <a href="#" class="nav-item" data-tab="lowstock">
+                <i class="material-icons">warning</i>
+                <span>Low stock</span>
+            </a>
+            <a href="#" class="nav-item" data-tab="expireddate">
+                <i class="material-icons">event_busy</i>
+                <span>Expired date</span>
+            </a>
+        </nav>
+    </div>
+
+    <!-- Modal for FOC/Clinic/Discard -->
+    <div id="foc-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">FOC/Clinic/Discard Details</h3>
+                <span class="close-modal">&times;</span>
+            </div>
+            <div class="modal-body">
+                <label for="foc-reason">Who is using this medicine?</label>
+                <input type="text" id="foc-reason" class="search-input" placeholder="Enter recipient name or reason..." style="margin-top: 8px; width: 100%;">
+            </div>
+            <div class="modal-footer">
+                <button id="cancel-foc" class="modal-btn modal-btn-secondary">Cancel</button>
+                <button id="confirm-foc" class="modal-btn modal-btn-primary">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

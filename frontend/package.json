@@ -1,0 +1,21 @@
+{
+  "name": "pharma-inventory-frontend",
+  "version": "1.0.0",
+  "description": "Frontend for pharmacy inventory management PWA",
+  "main": "index.html",
+  "scripts": {
+    "start": "npx serve ./frontend",
+    "dev": "npx serve -s ./frontend"
+  },
+  "keywords": [
+    "pharmacy",
+    "inventory",
+    "pwa",
+    "google-sheets"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "serve": "^14.2.1"
+  }
+}
