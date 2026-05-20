@@ -607,24 +607,38 @@ app.post('/api/stock', async (req, res) => {
 // Get all transfers from "Transfer" sheet
 app.get('/api/transfers', async (req, res) => {
   try {
-    const range = 'Transfer!A2:E'; // Start from row 2 to skip header
+    const range = 'Transfer!A1:G'; // Read from A1 to see headers and data
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
       range: range,
     });
 
     const rows = response.data.values;
-    if (!rows || rows.length === 0) {
+    if (!rows || rows.length <= 1) { // Only headers or empty
       return res.status(200).json([]);
     }
 
-    const transfers = rows.map(row => ({
-      date: row[0],               // Column A: Date
-      itemCode: row[1],           // Column B: Code
-      itemName: row[2],           // Column C: Name
-      quantity: row[3],           // Column D: Quantity
-      direction: row[4]           // Column E: Direction
-    }));
+    // Log headers for debugging
+    console.log('Transfer Sheet Headers:', rows[0]);
+
+    // Skip header row
+    const dataRows = rows.slice(1);
+
+    const transfers = dataRows.map(row => {
+      // Clean transactionId (remove leading quote if present)
+      let tid = row[0] || '';
+      if (tid.startsWith("'")) tid = tid.substring(1);
+
+      return {
+        transactionId: tid,         // Column A: ID
+        date: row[1],               // Column B: Date
+        itemCode: row[2],           // Column C: Code
+        itemName: row[3],           // Column D: Name
+        quantity: row[4],           // Column E: Quantity
+        direction: row[5],          // Column F: Direction
+        reason: row[6] || ''        // Column G: Reason
+      };
+    });
 
     res.json(transfers);
   } catch (error) {
@@ -636,44 +650,53 @@ app.get('/api/transfers', async (req, res) => {
 // Transfer stock between stores
 app.post('/api/transfers', async (req, res) => {
   try {
-    const { itemCode, itemName, quantity, direction, date } = req.body;
+    const { transactionId, id, itemCode, itemName, quantity, direction, date, reason } = req.body;
+    
+    // Ensure we have a transactionId, fallback to id, or generate one if both missing
+    // Prefix with ' to force Google Sheets to treat it as text in Column A
+    const finalTransactionId = `'${String(transactionId || id || `TXN-${Date.now()}-${Math.floor(Math.random() * 1000)}`)}`;
+
+    console.log('Recording transfer to Google Sheets (Values for A-G):', [
+      finalTransactionId, date, itemCode, itemName, quantity, direction, reason || ''
+    ]);
 
     if (!itemCode || !itemName || !quantity || !direction || !date) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    const range = 'Transfer!A:D'; // Assuming A=Date, B=Code, C=Name, D=Quantity, E=Direction
+    const range = 'Transfer!A:G'; 
 
-    const values = [[date, itemCode, itemName, quantity, direction]];
+    const values = [[finalTransactionId, date, itemCode, itemName, quantity, direction, reason || '']];
+
+    console.log(values)
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
       range: range,
-      valueInputOption: 'RAW',
+      valueInputOption: 'USER_ENTERED',
       resource: {
         values: values
       }
     });
 
-    res.status(201).json({ message: 'Transfer recorded successfully' });
+    res.status(201).json({ message: 'Transfer recorded successfully', transactionId: finalTransactionId.substring(1) });
   } catch (error) {
     console.error('Error recording transfer:', error);
     res.status(500).json({ error: 'Failed to record transfer' });
   }
 });
 
-// Delete transfer by itemCode (used as ID)
-app.delete('/api/transfers/:itemCode', async (req, res) => {
+// Delete transfer by transactionId
+app.delete('/api/transfers/:id', async (req, res) => {
   try {
-    const itemCode = req.params.itemCode;
-    console.log("Here I AM")
+    const transactionId = req.params.id;
 
-    if (!itemCode) {
-      return res.status(400).json({ error: 'Item code is required' });
+    if (!transactionId) {
+      return res.status(400).json({ error: 'Transaction ID is required' });
     }
 
-    // Fetch all transfers to find the row with matching itemCode
-    const range = 'Transfer!A2:E';
+    // Fetch all transfers to find the row with matching transactionId
+    const range = 'Transfer!A2:G';
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
       range: range,
@@ -687,7 +710,7 @@ app.delete('/api/transfers/:itemCode', async (req, res) => {
     // Find the row index (1-based, accounting for header)
     let rowIndex = -1;
     for (let i = 0; i < rows.length; i++) {
-      if (rows[i][1] === itemCode) { // Column B is itemCode
+      if (rows[i][0] === transactionId) { // Column A is transactionId
         rowIndex = i + 2; // +2 because rows start at 2 and we skip header
         break;
       }
@@ -722,18 +745,18 @@ app.delete('/api/transfers/:itemCode', async (req, res) => {
   }
 });
 
-// Update transfer by itemCode (used as ID)
-app.put('/api/transfers/:itemCode', async (req, res) => {
+// Update transfer by transactionId
+app.put('/api/transfers/:id', async (req, res) => {
   try {
-    const itemCode = req.params.itemCode;
-    const { itemName, date, quantity, direction, reason } = req.body;
+    const transactionId = req.params.id;
+    const { itemName, date, quantity, direction, reason, itemCode } = req.body;
 
-    if (!itemCode) {
-      return res.status(400).json({ error: 'Item code is required' });
+    if (!transactionId) {
+      return res.status(400).json({ error: 'Transaction ID is required' });
     }
 
-    // Fetch all transfers to find the row with matching itemCode
-    const range = 'Transfer!A2:E';
+    // Fetch all transfers to find the row with matching transactionId
+    const range = 'Transfer!A2:G';
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
       range: range,
@@ -747,7 +770,7 @@ app.put('/api/transfers/:itemCode', async (req, res) => {
     // Find the row index (1-based, accounting for header)
     let rowIndex = -1;
     for (let i = 0; i < rows.length; i++) {
-      if (rows[i][1] === itemCode) { // Column B is itemCode
+      if (rows[i][0] === transactionId) { // Column A is transactionId
         rowIndex = i + 2; // +2 because rows start at 2 and we skip header
         break;
       }
@@ -759,16 +782,18 @@ app.put('/api/transfers/:itemCode', async (req, res) => {
 
     // Update the row with new values
     const updateValues = [[
-      date || rows[rowIndex - 2][0],                 // Column A: Date
-      itemCode,                                       // Column B: Code (unchanged)
-      itemName || rows[rowIndex - 2][2],              // Column C: Name
-      quantity !== undefined ? quantity : rows[rowIndex - 2][3],  // Column D: Quantity
-      direction || rows[rowIndex - 2][4]              // Column E: Direction
+      transactionId,                                  // Column A: ID
+      date || rows[rowIndex - 2][1],                 // Column B: Date
+      itemCode || rows[rowIndex - 2][2],              // Column C: Code
+      itemName || rows[rowIndex - 2][3],              // Column D: Name
+      quantity !== undefined ? quantity : rows[rowIndex - 2][4],  // Column E: Quantity
+      direction || rows[rowIndex - 2][5],             // Column F: Direction
+      reason !== undefined ? reason : rows[rowIndex - 2][6]       // Column G: Reason
     ]];
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `Transfer!A${rowIndex}:E${rowIndex}`,
+      range: `Transfer!A${rowIndex}:G${rowIndex}`,
       valueInputOption: 'RAW',
       resource: {
         values: updateValues
