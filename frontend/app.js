@@ -306,6 +306,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Current tab state
     let currentTab = 'dashboard';
+    let lastSupplier = '';
+    let lastTransferDirection = '';
+    let lastFocReason = '';
+    let isInitializing = false;
+    let dbPromise = null;
 
     // Helper to safely set text content
     const safeSetText = (id, text) => {
@@ -318,6 +323,14 @@ document.addEventListener('DOMContentLoaded', function() {
         const el = document.getElementById(id);
         if (el) el.innerHTML = html;
     };
+
+    // Add listener for foc-reason persistence (exists in index.html)
+    const focReasonInputGlobal = document.getElementById('foc-reason');
+    if (focReasonInputGlobal) {
+        focReasonInputGlobal.addEventListener('input', function() {
+            lastFocReason = this.value;
+        });
+    }
 
     // Offline data manager
     let offlineManager;
@@ -352,7 +365,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Initialize IndexedDB
     function initDB() {
-        return new Promise((resolve, reject) => {
+        if (dbPromise) return dbPromise;
+        
+        dbPromise = new Promise((resolve, reject) => {
             const request = indexedDB.open(DB_NAME, DB_VERSION);
 
             request.onerror = () => {
@@ -363,6 +378,19 @@ document.addEventListener('DOMContentLoaded', function() {
             request.onsuccess = () => {
                 db = request.result;
                 console.log('Database opened successfully');
+
+                // Handle version change (e.g., from another tab)
+                db.onversionchange = () => {
+                    console.warn('Database version change detected. Closing connection to allow upgrade.');
+                    db.close();
+                    db = null;
+                };
+
+                db.onclose = () => {
+                    console.warn('Database connection was closed unexpectedly.');
+                    db = null;
+                };
+
                 resolve(db);
             };
 
@@ -436,6 +464,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             };
         });
+        return dbPromise;
     }
 
     // Helper function to add/update items
@@ -792,19 +821,35 @@ document.addEventListener('DOMContentLoaded', function() {
                 lastUpdated: new Date()
             }));
 
-            // Clear existing data and add new data
-            await clearItemStore();
-            for (const item of items) {
-                await addItem(item);
+            // Clear existing data and add new data in a single transaction
+            if (db) {
+                await clearItemStore();
+                
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction([ITEM_STORE_NAME], 'readwrite');
+                    const objectStore = transaction.objectStore(ITEM_STORE_NAME);
+                    
+                    for (const item of items) {
+                        objectStore.put(item);
+                    }
+                    
+                    transaction.oncomplete = () => {
+                        console.log(`Synced ${items.length} items from Google Sheets`);
+                        resolve({ success: true, count: items.length });
+                    };
+                    
+                    transaction.onerror = () => {
+                        console.error('Error in batch item sync:', transaction.error);
+                        reject(transaction.error);
+                    };
+                });
             }
-
-            console.log(`Synced ${items.length} items from Google Sheets`);
-            return { success: true, count: items.length };
         } catch (error) {
             console.error('Sync failed:', error);
             return { success: false, error: error.message };
         }
     }
+
     // Synchronization function for low stock data
     async function syncLowStockData() {
         try {
@@ -813,40 +858,55 @@ document.addEventListener('DOMContentLoaded', function() {
                 throw new Error('No internet connection available');
             }
 
-        // Fetch low stock data from Google Sheets
-        const response = await fetch('/api/lowstock');
-        if (!response.ok) {
-            let errorMessage = 'Failed to fetch low stock data from server';
-            try {
-                const errorData = await response.json();
-                if (errorData.details) {
-                    errorMessage += `: ${errorData.details}`;
-                } else if (errorData.error) {
-                    errorMessage += `: ${errorData.error}`;
+            // Fetch low stock data from Google Sheets
+            const response = await fetch('/api/lowstock');
+            if (!response.ok) {
+                let errorMessage = 'Failed to fetch low stock data from server';
+                try {
+                    const errorData = await response.json();
+                    if (errorData.details) {
+                        errorMessage += `: ${errorData.details}`;
+                    } else if (errorData.error) {
+                        errorMessage += `: ${errorData.error}`;
+                    }
+                } catch (e) {
+                    errorMessage += `: ${response.statusText}`;
                 }
-            } catch (e) {
-                errorMessage += `: ${response.statusText}`;
+                throw new Error(errorMessage);
             }
-            throw new Error(errorMessage);
-        }
-        const data = await response.json();
+            const data = await response.json();
 
-        // Process the data to match our schema
-        const lowStockItems = data.map(row => ({
-            medicineName: row.medicineName || row['Medicine name'] || '',
-            currentStock: parseInt(row.currentStock || row['Current stock']) || 0,
-            soldLast30Days: parseInt(row.soldLast30Days || row['Items sold within last 30 days']) || 0,
-            lastUpdated: new Date()
-        }));
+            // Process the data to match our schema
+            const lowStockItems = data.map(row => ({
+                medicineName: row.medicineName || row['Medicine name'] || '',
+                currentStock: parseInt(row.currentStock || row['Current stock']) || 0,
+                soldLast30Days: parseInt(row.soldLast30Days || row['Items sold within last 30 days']) || 0,
+                lastUpdated: new Date()
+            }));
 
-        // Clear existing data and add new data
-        await clearLowStockStore();
-        for (const item of lowStockItems) {
-            await addLowStockItem(item);
-        }
-
-        console.log(`Synced ${lowStockItems.length} low stock items from Google Sheets`);
-            return { success: true, count: lowStockItems.length };
+            // Clear existing data and add new data in a single transaction
+            if (db) {
+                await clearLowStockStore();
+                
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['lowStock'], 'readwrite');
+                    const objectStore = transaction.objectStore('lowStock');
+                    
+                    for (const item of lowStockItems) {
+                        objectStore.put(item);
+                    }
+                    
+                    transaction.oncomplete = () => {
+                        console.log(`Synced ${lowStockItems.length} low stock items from Google Sheets`);
+                        resolve({ success: true, count: lowStockItems.length });
+                    };
+                    
+                    transaction.onerror = () => {
+                        console.error('Error in batch low stock sync:', transaction.error);
+                        reject(transaction.error);
+                    };
+                });
+            }
         } catch (error) {
             console.error('Low stock sync failed:', error);
             return { success: false, error: error.message };
@@ -861,40 +921,55 @@ document.addEventListener('DOMContentLoaded', function() {
                 throw new Error('No internet connection available');
             }
 
-        // Fetch expired date data from Google Sheets
-        const response = await fetch('/api/expireddate');
-        if (!response.ok) {
-            let errorMessage = 'Failed to fetch expired date data from server';
-            try {
-                const errorData = await response.json();
-                if (errorData.details) {
-                    errorMessage += `: ${errorData.details}`;
-                } else if (errorData.error) {
-                    errorMessage += `: ${errorData.error}`;
+            // Fetch expired date data from Google Sheets
+            const response = await fetch('/api/expireddate');
+            if (!response.ok) {
+                let errorMessage = 'Failed to fetch expired date data from server';
+                try {
+                    const errorData = await response.json();
+                    if (errorData.details) {
+                        errorMessage += `: ${errorData.details}`;
+                    } else if (errorData.error) {
+                        errorMessage += `: ${errorData.error}`;
+                    }
+                } catch (e) {
+                    errorMessage += `: ${response.statusText}`;
                 }
-            } catch (e) {
-                errorMessage += `: ${response.statusText}`;
+                throw new Error(errorMessage);
             }
-            throw new Error(errorMessage);
-        }
-        const data = await response.json();
+            const data = await response.json();
 
-        // Process the data to match our schema
-        const expiredDateItems = data.map(row => ({
-            medicineName: row.medicineName || row['Medicine name'] || '',
-            expiredDate: row.expiredDate || row['Expired date'] || '',
-            currentStock: parseInt(row.currentStock || row['Current stock']) || 0,
-            lastUpdated: new Date()
-        }));
+            // Process the data to match our schema
+            const expiredDateItems = data.map(row => ({
+                medicineName: row.medicineName || row['Medicine name'] || '',
+                expiredDate: row.expiredDate || row['Expired date'] || '',
+                currentStock: parseInt(row.currentStock || row['Current stock']) || 0,
+                lastUpdated: new Date()
+            }));
 
-        // Clear existing data and add new data
-        await clearExpiredDateStore();
-        for (const item of expiredDateItems) {
-            await addExpiredDateItem(item);
-        }
-
-        console.log(`Synced ${expiredDateItems.length} expired date items from Google Sheets`);
-            return { success: true, count: expiredDateItems.length };
+            // Clear existing data and add new data in a single transaction
+            if (db) {
+                await clearExpiredDateStore();
+                
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['expiredDate'], 'readwrite');
+                    const objectStore = transaction.objectStore('expiredDate');
+                    
+                    for (const item of expiredDateItems) {
+                        objectStore.put(item);
+                    }
+                    
+                    transaction.oncomplete = () => {
+                        console.log(`Synced ${expiredDateItems.length} expired date items from Google Sheets`);
+                        resolve({ success: true, count: expiredDateItems.length });
+                    };
+                    
+                    transaction.onerror = () => {
+                        console.error('Error in batch expired date sync:', transaction.error);
+                        reject(transaction.error);
+                    };
+                });
+            }
         } catch (error) {
             console.error('Expired date sync failed:', error);
             return { success: false, error: error.message };
@@ -947,6 +1022,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Function to initialize the database and populate with data if empty
     async function initializeAndLoadData() {
+        if (isInitializing) return;
+        isInitializing = true;
         try {
             await initDB();
 
@@ -970,6 +1047,8 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         } catch (error) {
             console.error('Failed to initialize and load data:', error);
+        } finally {
+            isInitializing = false;
         }
     }
 
@@ -977,7 +1056,7 @@ document.addEventListener('DOMContentLoaded', function() {
     async function syncPurchasesFromGoogleSheets() {
         try {
             console.log('Syncing purchases from Google Sheets...');
-            
+
             // Fetch all purchases from Google Sheets
             const response = await fetch('/api/purchases');
             if (!response.ok) {
@@ -995,23 +1074,36 @@ document.addEventListener('DOMContentLoaded', function() {
                 console.error(errorMessage);
                 return;
             }
-            
+
             const serverTransactions = await response.json();
             console.log(`Fetched ${serverTransactions.length} purchases from Google Sheets`);
-            
+
             // Clear existing synced purchases and save fresh data to IndexedDB
             if (db) {
                 await clearSyncedPurchases();
-                let savedCount = 0;
                 
-                for (const transaction of serverTransactions) {
-                    if (transaction.transactionId) {
-                        console.log (await saveSyncedPurchase(transaction));
-                        savedCount++;
+                return new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['syncedPurchases'], 'readwrite');
+                    const objectStore = transaction.objectStore('syncedPurchases');
+                    
+                    let savedCount = 0;
+                    for (const purchase of serverTransactions) {
+                        if (purchase.transactionId) {
+                            objectStore.put(purchase);
+                            savedCount++;
+                        }
                     }
-                }
-                
-                console.log(`Saved ${savedCount} purchases to IndexedDB syncedPurchases store`);
+                    
+                    transaction.oncomplete = () => {
+                        console.log(`Saved ${savedCount} purchases to IndexedDB syncedPurchases store`);
+                        resolve();
+                    };
+                    
+                    transaction.onerror = () => {
+                        console.error('Error saving batch purchases:', transaction.error);
+                        reject(transaction.error);
+                    };
+                });
             }
         } catch (error) {
             console.error('Error syncing purchases from Google Sheets:', error);
@@ -1073,6 +1165,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 <p>Total Items: <span id="total-items">Loading...</span></p>
                 <p>Items Low Stock: <span id="low-stock">Loading...</span></p>
                 <p>Expiring Soon: <span id="expiring-soon">Loading...</span></p>
+            </div>
+
+            <div class="card">
+                <h3>Daily In Transactions (Recent)</h3>
+                <div id="daily-in-transactions">
+                    <p>Loading transactions...</p>
+                </div>
             </div>
         `;
 
@@ -1138,9 +1237,23 @@ document.addEventListener('DOMContentLoaded', function() {
             let transactions = [];
 
             // First get local pending purchases from IndexedDB
+            const allPending = await getAllPendingPurchasesHelper();
+            
+            // Get pending deletions to filter them out
+            const pendingDeletions = new Set(
+                allPending
+                    .filter(item => item.action === 'delete' || item.type === 'purchase_deletion')
+                    .map(item => item.transactionId || item.id)
+            );
+
             if (db) {
-                const allPending = await getAllPendingPurchasesHelper();
-                const purchaseTransactions = allPending.filter(item => item.type === 'purchase');
+                const purchaseTransactions = allPending
+                    .filter(item => item.type === 'purchase' && !pendingDeletions.has(item.transactionId))
+                    .map(item => ({
+                        ...item.purchaseData,
+                        transactionId: item.transactionId,
+                        isPending: true
+                    }));
                 transactions = [...transactions, ...purchaseTransactions];
             }
 
@@ -1151,32 +1264,26 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (response.ok) {
                         const serverTransactions = await response.json();
 
+                        // Filter out pending deletions
+                        const filteredServerTransactions = serverTransactions.filter(t => !pendingDeletions.has(t.transactionId));
+
                         // Clear old synced data and save fresh data to IndexedDB
                         if (db) {
                             await clearSyncedPurchases();
-                            let savedCount = 0;
-                            for (const txn of serverTransactions) {
-                                if (txn.itemCode) {
+                            for (const txn of filteredServerTransactions) {
+                                if (txn.transactionId) {
                                     await saveSyncedPurchase(txn);
-                                    savedCount++;
-                                } else {
-                                    console.warn('Skipping purchase record without itemCode:', txn);
                                 }
                             }
-                            console.log(`Saved ${savedCount}/${serverTransactions.length} purchases to IndexedDB`);
                         }
 
-                        // Merge server data with local pending for display
-                        const allPending = await getAllPendingPurchasesHelper();
-                        const purchaseTransactions = allPending.filter(item => item.type === 'purchase');
-                        transactions = [...serverTransactions, ...purchaseTransactions];
-                        // Deduplicate by itemCode
-                        const seenCodes = new Set();
-                        transactions = transactions.filter(t => {
-                            if (seenCodes.has(t.itemCode)) return false;
-                            seenCodes.add(t.itemCode);
-                            return true;
-                        });
+                        // Combine with pending
+                        const seenIds = new Set(transactions.map(t => t.transactionId));
+                        for (const serverTxn of filteredServerTransactions) {
+                            if (!seenIds.has(serverTxn.transactionId)) {
+                                transactions.push(serverTxn);
+                            }
+                        }
                     }
                 } catch (error) {
                     console.error('Error fetching daily in transactions from server:', error);
@@ -1184,68 +1291,121 @@ document.addEventListener('DOMContentLoaded', function() {
             } else if (db) {
                 // If offline, merge local pending with synced data from IndexedDB
                 const syncedPurchases = await getAllSyncedPurchases();
-                // Combine synced server data with local pending, avoiding duplicates
-                const syncedCodes = new Set(transactions.map(t => t.itemCode));
+                
+                // Combine synced server data with local pending, avoiding duplicates and respect deletions
+                const seenIds = new Set(transactions.map(t => t.transactionId));
                 for (const synced of syncedPurchases) {
-                    if (!syncedCodes.has(synced.itemCode)) {
+                    const id = synced.transactionId || synced.id;
+                    if (!seenIds.has(id) && !pendingDeletions.has(id)) {
                         transactions.push(synced);
                     }
-                }
-                // If still no data, show synced data
-                if (transactions.length === 0) {
-                    transactions = syncedPurchases;
                 }
             }
 
             if (transactions.length === 0) {
-                // Don't try to update non-existent element in dashboard
-                console.log('No daily in transactions found');
+                safeSetHTML('daily-in-transactions', '<p>No daily in transactions found</p>');
                 return;
             }
 
+            // Sort by date (descending)
+            transactions.sort((a, b) => {
+                const dateA = new Date(a.purchaseDate || a.date);
+                const dateB = new Date(b.purchaseDate || b.date);
+                return dateB - dateA;
+            });
+
+            // Limit to top 10 for dashboard
+            const displayTransactions = transactions.slice(0, 10);
+
             let transactionsHtml = '<table class="transaction-table"><thead><tr><th>Date</th><th>Item Name</th><th>Quantity</th><th>Total Price</th><th>Actions</th></tr></thead><tbody>';
 
-            transactions.forEach(transaction => {
+            displayTransactions.forEach(transaction => {
+                const id = transaction.transactionId || transaction.id || '';
                 const date = transaction.purchaseDate || transaction.date || 'N/A';
                 const itemName = transaction.itemName || transaction.name || 'N/A';
                 const quantity = transaction.packageScheme?.numberOfBoxes ?
                     transaction.packageScheme.numberOfBoxes * transaction.packageScheme.cardsPerBox * transaction.packageScheme.unitsPerCard :
-                    'N/A';
+                    transaction.quantity || 'N/A';
                 const totalPrice = transaction.totalPrice || 'N/A';
 
                 transactionsHtml += `
-                    <tr data-id="${transaction.itemCode || ''}" data-type="daily-in">
+                    <tr data-id="${id}" data-type="daily-in" class="${transaction.isPending ? 'pending-row' : ''}">
                         <td>${date}</td>
                         <td>${itemName}</td>
                         <td>${quantity}</td>
                         <td>${totalPrice}</td>
                         <td>
-                            <button class="btn-edit" onclick="showTransactionInAddForm('${transaction.itemCode || ''}', 'daily-in')">Edit</button>
-                            <button class="btn-delete" onclick="deleteTransaction('${transaction.itemCode || ''}', 'daily-in')">Delete</button>
+                            <button class="btn-edit" onclick="showTransactionInAddForm('${id}', 'daily-in')">Edit</button>
+                            <button class="btn-delete" onclick="deleteTransaction('${id}', 'daily-in')">Delete</button>
                         </td>
                     </tr>
                 `;
             });
 
             transactionsHtml += '</tbody></table>';
-            // Don't try to update non-existent element in dashboard
-            console.log('Daily in transactions loaded successfully');
+            safeSetHTML('daily-in-transactions', transactionsHtml);
         } catch (error) {
             console.error('Error loading daily in transactions:', error);
-            // Don't try to update non-existent element in dashboard
+            safeSetHTML('daily-in-transactions', '<p>Error loading transactions</p>');
         }
+    }
+
+    // Helper to render a transfer table
+    function renderTransferTable(containerId, transactions, showReason = false) {
+        if (transactions.length === 0) {
+            safeSetHTML(containerId, '<p>No transactions found</p>');
+            return;
+        }
+
+        let transactionsHtml = `<table class="transaction-table"><thead><tr><th>Date</th><th>Item Name</th><th>Quantity</th>${showReason ? '<th>Reason</th>' : ''}<th>Actions</th></tr></thead><tbody>`;
+
+        transactions.forEach(transaction => {
+            const transactionId = transaction.transactionId || transaction.id || '';
+            const date = transaction.date || 'N/A';
+            const itemName = transaction.itemName || 'N/A';
+            const quantity = transaction.quantity || 'N/A';
+            const reason = transaction.reason || 'N/A';
+
+            transactionsHtml += `
+                <tr data-id="${transactionId}" data-type="transfer" class="${transaction.isPending ? 'pending-row' : ''}">
+                    <td>${date}</td>
+                    <td>${itemName}</td>
+                    <td>${quantity}</td>
+                    ${showReason ? `<td>${reason}</td>` : ''}
+                    <td>
+                        <button class="btn-edit" onclick="editTransaction('${transactionId}', 'transfer')">Edit</button>
+                        <button class="btn-delete" onclick="deleteTransaction('${transactionId}', 'transfer')">Delete</button>
+                    </td>
+                </tr>
+            `;
+        });
+
+        transactionsHtml += '</tbody></table>';
+        safeSetHTML(containerId, transactionsHtml);
     }
 
     async function loadTransferTransactions() {
         try {
             let transactions = [];
 
-            // First try to get data from local IndexedDB
-            if (db) {
-                const allPending = await getAllPendingPurchasesHelper();
+            // First get local pending purchases from IndexedDB
+            const allPending = await getAllPendingPurchasesHelper();
+            
+            // Get pending deletions
+            const pendingDeletions = new Set(
+                allPending
+                    .filter(item => item.action === 'delete' || item.type === 'transfer_deletion')
+                    .map(item => item.transactionId || item.id)
+            );
 
+            if (db) {
                 // Filter to get only transfer transactions
-                const transferTransactions = allPending.filter(item => item.type === 'transfer');
+                const transferTransactions = allPending
+                    .filter(item => item.type === 'transfer' && !pendingDeletions.has(item.transactionId))
+                    .map(item => ({
+                        ...item,
+                        isPending: true
+                    }));
                 transactions = [...transactions, ...transferTransactions];
             }
 
@@ -1256,100 +1416,66 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (response.ok) {
                         const serverTransactions = await response.json();
 
+                        // Filter out deletions
+                        const filteredServerTransactions = serverTransactions.filter(t => !pendingDeletions.has(t.transactionId));
+
                         // Clear old synced data and save fresh data to IndexedDB
                         if (db) {
                             await clearSyncedTransfers();
-                            let savedCount = 0;
-                            for (const txn of serverTransactions) {
+                            for (const txn of filteredServerTransactions) {
                                 if (txn.transactionId) {
                                     await saveSyncedTransfer(txn);
-                                    savedCount++;
-                                } else {
-                                    console.warn('Skipping transfer record without transactionId:', txn);
                                 }
                             }
-                            console.log(`Saved ${savedCount}/${serverTransactions.length} transfers to IndexedDB`);
                         }
 
-                        // Merge server data with local pending for display
-                        const allPending = await getAllPendingPurchasesHelper();
-                        const transferTransactions = allPending.filter(item => item.type === 'transfer');
-                        transactions = [...serverTransactions, ...transferTransactions];
-                        // Deduplicate by transactionId
-                        const seenIds = new Set();
-                        transactions = transactions.filter(t => {
-                            if (seenIds.has(t.transactionId)) return false;
-                            seenIds.add(t.transactionId);
-                            return true;
-                        });
+                        // Combine with pending
+                        const seenIds = new Set(transactions.map(t => t.transactionId));
+                        for (const serverTxn of filteredServerTransactions) {
+                            if (!seenIds.has(serverTxn.transactionId)) {
+                                transactions.push(serverTxn);
+                            }
+                        }
                     }
-                    console.log(transactions)
                 } catch (error) {
                     console.error('Error fetching transfer transactions from server:', error);
                 }
             } else if (db) {
                 // If offline, merge local pending with synced data from IndexedDB
                 const syncedTransfers = await getAllSyncedTransfers();
-                // Combine synced server data with local pending, avoiding duplicates
-                const syncedIds = new Set(transactions.map(t => t.transactionId));
+                // Combine synced server data with local pending, avoiding duplicates and respect deletions
+                const seenIds = new Set(transactions.map(t => t.transactionId));
                 for (const synced of syncedTransfers) {
-                    if (!syncedIds.has(synced.transactionId)) {
+                    const id = synced.transactionId || synced.id;
+                    if (!seenIds.has(id) && !pendingDeletions.has(id)) {
                         transactions.push(synced);
                     }
                 }
-                // If still no data, show synced data
-                if (transactions.length === 0) {
-                    transactions = syncedTransfers;
-                }
             }
 
-            if (transactions.length === 0) {
-                safeSetHTML('transfer-transactions', '<p>No transactions found</p>');
-                return;
-            }
-
-            console.log(transactions)
-
-            let transactionsHtml = '<table class="transaction-table"><thead><tr><th>Date</th><th>Item Name</th><th>Quantity</th><th>Direction</th><th>Reason</th><th>Actions</th></tr></thead><tbody>';
-
-            transactions.forEach(transaction => {
-                const transactionId = transaction.transactionId || '';
-                const date = transaction.date || 'N/A';
-                const itemName = transaction.itemName || 'N/A';
-                const quantity = transaction.quantity || 'N/A';
-                const direction = transaction.direction || 'N/A';
-                const reason = transaction.reason || 'N/A';
-
-                // Format direction for display
-                let directionDisplay = direction;
-                if (direction === 'main-to-sub') {
-                    directionDisplay = 'Main to Sub';
-                } else if (direction === 'sub-to-main') {
-                    directionDisplay = 'Sub to Main';
-                } else if (direction === 'foc-clinic-discard') {
-                    directionDisplay = 'FOC/Clinic/Discard';
-                }
-
-                transactionsHtml += `
-                    <tr data-id="${transactionId}" data-type="transfer">
-                        <td>${date}</td>
-                        <td>${itemName}</td>
-                        <td>${quantity}</td>
-                        <td>${directionDisplay}</td>
-                        <td>${reason}</td>
-                        <td>
-                            <button class="btn-edit" onclick="editTransaction('${transactionId}', 'transfer')">Edit</button>
-                            <button class="btn-delete" onclick="deleteTransaction('${transactionId}', 'transfer')">Delete</button>
-                        </td>
-                    </tr>
-                `;
+            // Sort by date (descending)
+            transactions.sort((a, b) => {
+                const dateA = new Date(a.date);
+                const dateB = new Date(b.date);
+                return dateB - dateA;
             });
 
-            transactionsHtml += '</tbody></table>';
-            safeSetHTML('transfer-transactions', transactionsHtml);
+            // Group transactions by direction
+            const mainToSub = transactions.filter(t => t.direction === 'main-to-sub');
+            const subToMain = transactions.filter(t => t.direction === 'sub-to-main');
+            const foc = transactions.filter(t => t.direction === 'foc-clinic-discard');
+
+            // Render the tables - only show reason for FOC
+            renderTransferTable('transfer-transactions-main-to-sub', mainToSub, false);
+            renderTransferTable('transfer-transactions-sub-to-main', subToMain, false);
+            renderTransferTable('transfer-transactions-foc', foc, true);
+
         } catch (error) {
             console.error('Error loading transfer transactions:', error);
-            safeSetHTML('transfer-transactions', '<p>Error loading transactions</p>');
+            const errorHtml = '<p>Error loading transactions</p>';
+            safeSetHTML('transfer-transactions-main-to-sub', errorHtml);
+            safeSetHTML('transfer-transactions-sub-to-main', errorHtml);
+            safeSetHTML('transfer-transactions-foc', errorHtml);
         }
     }
 
@@ -1473,7 +1599,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
                     <div class="input-group">
                         <label for="supplier">Supplier</label>
-                        <input type="text" id="supplier" placeholder="Enter supplier name" required>
+                        <input type="text" id="supplier" placeholder="Enter supplier name" value="${lastSupplier}" required>
                     </div>
 
                     <div class="input-group">
@@ -1507,7 +1633,19 @@ document.addEventListener('DOMContentLoaded', function() {
         `;
 
         // Set up form handling
+        const purchaseDateInput = document.getElementById('purchase-date');
+        if (purchaseDateInput) {
+            const today = new Date().toISOString().split('T')[0];
+            purchaseDateInput.value = today;
+        }
+
         const selectItemInput = document.getElementById('select-item');
+        const supplierInput = document.getElementById('supplier');
+        if (supplierInput) {
+            supplierInput.addEventListener('input', function() {
+                lastSupplier = this.value;
+            });
+        }
         const suggestionsDiv = document.getElementById('item-suggestions');
         selectItemInput.addEventListener('input', debounce(function(e) {
             handleItemSearch(e, suggestionsDiv);
@@ -1525,7 +1663,7 @@ document.addEventListener('DOMContentLoaded', function() {
             `;
             container.appendChild(paymentRow);
             updateRemoveButtons();
-            validatePaymentTotal();
+            autoDistributePayment();
         };
 
         window.removePaymentMethod = function(button) {
@@ -1533,7 +1671,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (container.children.length > 1) {
                 button.parentElement.remove();
                 updateRemoveButtons();
-                validatePaymentTotal();
+                autoDistributePayment();
             }
         };
 
@@ -1544,10 +1682,10 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
 
-        // Add event listener to total price input for validation
+        // Add event listener to total price input for validation and auto-distribution
         const totalPriceInput = document.getElementById('total-price');
         if (totalPriceInput) {
-            totalPriceInput.addEventListener('input', validatePaymentTotal);
+            totalPriceInput.addEventListener('input', autoDistributePayment);
         }
 
         // Add event listener to expired date input to auto-set to first day of month
@@ -1610,10 +1748,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 const allPending = await getAllPendingPurchasesHelper();
                 const allSynced = await getAllSyncedPurchases();
                 
+                // Get pending deletions to filter them out
+                const pendingDeletions = new Set(
+                    allPending
+                        .filter(item => item.action === 'delete' || item.type === 'purchase_deletion')
+                        .map(item => item.transactionId || item.id)
+                );
+
                 // Normalize and combine transactions
                 // Pending purchases have nested purchaseData, synced purchases are flat
                 const normalizedPending = allPending
-                    .filter(item => item.type === 'purchase')
+                    .filter(item => item.type === 'purchase' && !pendingDeletions.has(item.transactionId))
                     .map(item => ({
                         ...item.purchaseData,
                         transactionId: item.transactionId,
@@ -1630,7 +1775,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 
                 for (const synced of allSynced) {
                     const id = synced.transactionId || synced.id;
-                    if (!seenIds.has(id)) {
+                    if (!seenIds.has(id) && !pendingDeletions.has(id)) {
                         seenIds.add(id);
                         transactions.push(synced);
                     }
@@ -1643,10 +1788,19 @@ document.addEventListener('DOMContentLoaded', function() {
                     const response = await fetch('/api/purchases');
                     if (response.ok) {
                         const serverTransactions = await response.json();
-                        transactions = serverTransactions;
                         
-                        // Store in local IndexedDB
-                        for (const transaction of serverTransactions) {
+                        // Again, filter out anything we know is deleted locally
+                        const allPending = await getAllPendingPurchasesHelper();
+                        const pendingDeletions = new Set(
+                            allPending
+                                .filter(item => item.action === 'delete' || item.type === 'purchase_deletion')
+                                .map(item => item.transactionId || item.id)
+                        );
+                        
+                        transactions = serverTransactions.filter(t => !pendingDeletions.has(t.transactionId));
+                        
+                        // Store in local IndexedDB (only those not deleted)
+                        for (const transaction of transactions) {
                             await saveSyncedPurchase(transaction);
                         }
                     }
@@ -1667,12 +1821,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 return dateB - dateA;
             });
             
-            let transactionsHtml = '<table class="transaction-table"><thead><tr><th>Purchase Date</th><th>Medicine Name</th><th>Total Amount</th><th>Total Units</th><th>Actions</th></tr></thead><tbody>';
+            let transactionsHtml = '<table class="transaction-table"><thead><tr><th>Purchase Date</th><th>Medicine Name</th><th>Total Amount</th><th>Total Units</th><th>Expired Date</th><th>Actions</th></tr></thead><tbody>';
             
             transactions.forEach(transaction => {
                 const purchaseDate = transaction.purchaseDate || transaction.date || 'N/A';
                 const itemName = transaction.itemName || transaction.name || 'N/A';
                 const totalPrice = transaction.totalPrice || 'N/A';
+                const expiredDate = transaction.expiryDate || transaction.expiredDate || 'N/A';
                 const totalUnits = transaction.packageScheme ? 
                     (transaction.packageScheme.numberOfBoxes || 0) * (transaction.packageScheme.cardsPerBox || 0) * (transaction.packageScheme.unitsPerCard || 0) : 
                     transaction.quantity || 'N/A';
@@ -1683,6 +1838,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         <td>${itemName}</td>
                         <td>${totalPrice}</td>
                         <td>${totalUnits}</td>
+                        <td>${expiredDate}</td>
                         <td>
                             <button class="btn-edit" onclick="editPurchaseTransaction('${transaction.transactionId || transaction.id || ''}')">Edit</button>
                             <button class="btn-delete" onclick="deletePurchaseTransaction('${transaction.transactionId || transaction.id || ''}')">Delete</button>
@@ -1996,9 +2152,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         <label for="transfer-direction">Direction</label>
                         <select id="transfer-direction" required>
                             <option value="">Select direction</option>
-                            <option value="main-to-sub">Main Store to Sub Store</option>
-                            <option value="sub-to-main">Sub Store to Main Store</option>
-                            <option value="foc-clinic-discard">FOC/Clinic/Discard</option>
+                            <option value="main-to-sub" ${lastTransferDirection === 'main-to-sub' ? 'selected' : ''}>Main Store to Sub Store</option>
+                            <option value="sub-to-main" ${lastTransferDirection === 'sub-to-main' ? 'selected' : ''}>Sub Store to Main Store</option>
+                            <option value="foc-clinic-discard" ${lastTransferDirection === 'foc-clinic-discard' ? 'selected' : ''}>FOC/Clinic/Discard</option>
                         </select>
                     </div>
 
@@ -2007,8 +2163,22 @@ document.addEventListener('DOMContentLoaded', function() {
             </div>
 
             <div class="card">
-                <h3>Transfer Transactions</h3>
-                <div id="transfer-transactions">
+                <h3>Main Store to Sub Store</h3>
+                <div id="transfer-transactions-main-to-sub">
+                    <p>Loading transactions...</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>Sub Store to Main Store</h3>
+                <div id="transfer-transactions-sub-to-main">
+                    <p>Loading transactions...</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>FOC / Clinic / Discard</h3>
+                <div id="transfer-transactions-foc">
                     <p>Loading transactions...</p>
                 </div>
             </div>
@@ -2017,6 +2187,13 @@ document.addEventListener('DOMContentLoaded', function() {
         // Set up transfer form handling
         const transferItemSearch = document.getElementById('transfer-item-search');
         const transferSuggestionsDiv = document.getElementById('transfer-item-suggestions');
+        const transferDirectionSelect = document.getElementById('transfer-direction');
+
+        if (transferDirectionSelect) {
+            transferDirectionSelect.addEventListener('change', function() {
+                lastTransferDirection = this.value;
+            });
+        }
 
         // Load transfer transactions
         loadTransferTransactions();
@@ -2266,6 +2443,39 @@ async function loadLowStockData() {
         }
     }
 
+    // Automatically distribute total price among payment amount inputs
+    function autoDistributePayment() {
+        const totalPriceInput = document.getElementById('total-price');
+        if (!totalPriceInput) return;
+        
+        const totalPrice = parseFloat(totalPriceInput.value) || 0;
+        const amountInputs = document.querySelectorAll('.payment-amount-input');
+        
+        if (amountInputs.length === 0) return;
+        
+        if (totalPrice <= 0) {
+            amountInputs.forEach(input => input.value = '');
+            validatePaymentTotal();
+            return;
+        }
+        
+        const amountPerPayment = Math.floor((totalPrice / amountInputs.length) * 100) / 100;
+        let distributed = 0;
+        
+        amountInputs.forEach((input, index) => {
+            if (index === amountInputs.length - 1) {
+                // Last one gets the remainder to avoid rounding issues
+                const remainder = (totalPrice - distributed).toFixed(2);
+                input.value = remainder;
+            } else {
+                input.value = amountPerPayment.toFixed(2);
+                distributed += amountPerPayment;
+            }
+        });
+        
+        validatePaymentTotal();
+    }
+
     // Update remove buttons visibility for payment methods
     function updateRemoveButtons() {
         const container = document.getElementById('payment-methods-container');
@@ -2437,6 +2647,18 @@ async function loadLowStockData() {
             // Update UI immediately
             document.getElementById('add-item-form').reset();
             
+            // Restore supplier from lastSupplier and set purchase date to today
+            const supplierInput = document.getElementById('supplier');
+            if (supplierInput) {
+                supplierInput.value = lastSupplier;
+            }
+            
+            const purchaseDateInput = document.getElementById('purchase-date');
+            if (purchaseDateInput) {
+                const today = new Date().toISOString().split('T')[0];
+                purchaseDateInput.value = today;
+            }
+            
             // Clear payment methods container inputs
             const paymentMethodsContainer = document.getElementById('payment-methods-container');
             if (paymentMethodsContainer) {
@@ -2530,8 +2752,10 @@ async function loadLowStockData() {
             const modal = document.getElementById('foc-modal');
             const focReasonInput = document.getElementById('foc-reason');
 
-            // Clear previous input
-            focReasonInput.value = '';
+            // Initialize with last value
+            if (focReasonInput) {
+                focReasonInput.value = lastFocReason;
+            }
 
             // Show modal
             modal.style.display = 'block';
@@ -2620,6 +2844,12 @@ async function loadLowStockData() {
 
             alert('Transfer recorded locally!');
             document.getElementById('transfer-form').reset();
+            
+            // Restore persistent fields
+            const transferDirectionSelect = document.getElementById('transfer-direction');
+            if (transferDirectionSelect) {
+                transferDirectionSelect.value = lastTransferDirection;
+            }
 
             // Close modal if provided
             if (modal) {
@@ -3384,8 +3614,8 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
             }
 
             alert('Transaction deleted locally!');
-            // Reload the dashboard to reflect changes
-            loadDashboard();
+            // Reload the current tab to reflect changes
+            loadTab(currentTab);
 
             // If online, try to sync deletion to server in the background
             if (navigator.onLine) {
