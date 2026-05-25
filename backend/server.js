@@ -660,7 +660,7 @@ app.post('/api/transfers', async (req, res) => {
       finalTransactionId, date, itemCode, itemName, quantity, direction, reason || ''
     ]);
 
-    if (!itemCode || !itemName || !quantity || !direction || !date) {
+    if (!itemCode || !itemName || (quantity === undefined || quantity === null || quantity === '') || !direction || !date) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 

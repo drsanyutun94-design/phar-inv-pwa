@@ -1030,10 +1030,11 @@ document.addEventListener('DOMContentLoaded', function() {
             // Check if we have data in the database
             const itemCount = (await getAllItems()).length;
 
-            // Always sync purchases from Google Sheets when online and page refreshes
+            // Always sync purchases and transfers from Google Sheets when online and page refreshes
             if (navigator.onLine) {
                 await syncPurchasesFromGoogleSheets();
-                console.log('Purchases synced from Google Sheets on page load');
+                await syncTransfersFromGoogleSheets();
+                console.log('Purchases and transfers synced from Google Sheets on page load');
             }
 
             if (itemCount === 0) {
@@ -1057,8 +1058,8 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             console.log('Syncing purchases from Google Sheets...');
 
-            // Fetch all purchases from Google Sheets
-            const response = await fetch('/api/purchases');
+            // Fetch all purchases from Google Sheets - use cache: 'no-cache' to ensure we get fresh data
+            const response = await fetch('/api/purchases', { cache: 'no-cache' });
             if (!response.ok) {
                 let errorMessage = 'Error fetching purchases from Google Sheets';
                 try {
@@ -1072,7 +1073,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     errorMessage += `: ${response.statusText}`;
                 }
                 console.error(errorMessage);
-                return;
+                return null;
             }
 
             const serverTransactions = await response.json();
@@ -1082,7 +1083,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (db) {
                 await clearSyncedPurchases();
                 
-                return new Promise((resolve, reject) => {
+                await new Promise((resolve, reject) => {
                     const transaction = db.transaction(['syncedPurchases'], 'readwrite');
                     const objectStore = transaction.objectStore('syncedPurchases');
                     
@@ -1104,9 +1105,101 @@ document.addEventListener('DOMContentLoaded', function() {
                         reject(transaction.error);
                     };
                 });
+
+                // RECONCILIATION: Check pendingPurchases and remove any that are no longer in the spreadsheet
+                // This handles cases where data was deleted directly from Google Sheets
+                try {
+                    const allPending = await getAllPendingPurchasesHelper();
+                    const serverTransactionIds = new Set(serverTransactions.map(t => t.transactionId));
+                    
+                    for (const pending of allPending) {
+                        // If it's a purchase 'add' or 'edit' that isn't on the server anymore, it was likely deleted from the sheet
+                        if (pending.type === 'purchase' && (pending.action === 'add' || pending.action === 'edit')) {
+                            if (!serverTransactionIds.has(pending.transactionId)) {
+                                console.log(`Reconciliation: Removing orphaned pending purchase ${pending.transactionId} (not found in Google Sheets)`);
+                                await deletePendingPurchase(pending.transactionId);
+                            }
+                        }
+                    }
+                } catch (reconcileError) {
+                    console.error('Error during pending purchases reconciliation:', reconcileError);
+                }
+
+                return serverTransactions;
             }
+            return [];
         } catch (error) {
             console.error('Error syncing purchases from Google Sheets:', error);
+            return null;
+        }
+    }
+
+    // Function to sync transfers from Google Sheets to IndexedDB
+    async function syncTransfersFromGoogleSheets() {
+        try {
+            console.log('Syncing transfers from Google Sheets...');
+
+            // Fetch all transfers from Google Sheets - use cache: 'no-cache' to ensure we get fresh data
+            const response = await fetch('/api/transfers', { cache: 'no-cache' });
+            if (!response.ok) {
+                console.error('Error fetching transfers from Google Sheets');
+                return null;
+            }
+
+            const serverTransactions = await response.json();
+            console.log(`Fetched ${serverTransactions.length} transfers from Google Sheets`);
+
+            // Clear existing synced transfers and save fresh data to IndexedDB
+            if (db) {
+                await clearSyncedTransfers();
+                
+                await new Promise((resolve, reject) => {
+                    const transaction = db.transaction(['syncedTransfers'], 'readwrite');
+                    const objectStore = transaction.objectStore('syncedTransfers');
+                    
+                    let savedCount = 0;
+                    for (const transfer of serverTransactions) {
+                        if (transfer.transactionId) {
+                            objectStore.put(transfer);
+                            savedCount++;
+                        }
+                    }
+                    
+                    transaction.oncomplete = () => {
+                        console.log(`Saved ${savedCount} transfers to IndexedDB syncedTransfers store`);
+                        resolve();
+                    };
+                    
+                    transaction.onerror = () => {
+                        console.error('Error saving batch transfers:', transaction.error);
+                        reject(transaction.error);
+                    };
+                });
+
+                // RECONCILIATION: Check pendingPurchases for transfers and remove any that are no longer in the spreadsheet
+                try {
+                    const allPending = await getAllPendingPurchasesHelper();
+                    const serverTransactionIds = new Set(serverTransactions.map(t => t.transactionId));
+                    
+                    for (const pending of allPending) {
+                        // If it's a transfer that isn't on the server anymore, it was likely deleted from the sheet
+                        if (pending.type === 'transfer') {
+                            if (!serverTransactionIds.has(pending.transactionId)) {
+                                console.log(`Reconciliation: Removing orphaned pending transfer ${pending.transactionId} (not found in Google Sheets)`);
+                                await deletePendingPurchase(pending.transactionId);
+                            }
+                        }
+                    }
+                } catch (reconcileError) {
+                    console.error('Error during pending transfers reconciliation:', reconcileError);
+                }
+
+                return serverTransactions;
+            }
+            return [];
+        } catch (error) {
+            console.error('Error syncing transfers from Google Sheets:', error);
+            return null;
         }
     }
 
@@ -1158,6 +1251,10 @@ document.addEventListener('DOMContentLoaded', function() {
             <div class="card">
                 <h2>Pharma Inventory Dashboard</h2>
                 <p>Welcome to your pharmacy inventory manager. Use the navigation below to search items, add new inventory, or transfer stock between stores.</p>
+                <button id="sync-all-btn" class="btn" style="margin-top: 15px; background-color: #4caf50;">
+                    <i class="material-icons" style="vertical-align: middle; font-size: 18px; margin-right: 5px;">sync</i>
+                    <span style="vertical-align: middle;">Sync All Data Now</span>
+                </button>
             </div>
 
             <div class="card">
@@ -1174,6 +1271,42 @@ document.addEventListener('DOMContentLoaded', function() {
                 </div>
             </div>
         `;
+
+        // Set up manual sync button
+        const syncBtn = document.getElementById('sync-all-btn');
+        if (syncBtn) {
+            syncBtn.addEventListener('click', async function() {
+                if (!navigator.onLine) {
+                    alert('You are offline. Please connect to the internet to sync.');
+                    return;
+                }
+
+                this.disabled = true;
+                const originalContent = this.innerHTML;
+                this.innerHTML = '<i class="material-icons" style="vertical-align: middle; font-size: 18px; margin-right: 5px; animation: spin 2s linear infinite;">sync</i> <span style="vertical-align: middle;">Syncing...</span>';
+                
+                try {
+                    // Centralized sync for all data types
+                    await syncWithGoogleSheets();
+                    await syncLowStockData();
+                    await syncExpiredDateData();
+                    await syncPurchasesFromGoogleSheets();
+                    await syncTransfersFromGoogleSheets();
+                    
+                    await updateLastSyncTime();
+                    
+                    alert('All data synced successfully from Google Sheets!');
+                    
+                    // Reload the dashboard to show fresh data
+                    loadDashboard();
+                } catch (error) {
+                    console.error('Manual sync failed:', error);
+                    alert('Sync failed: ' + error.message);
+                    this.disabled = false;
+                    this.innerHTML = originalContent;
+                }
+            });
+        }
 
         // Load stats and transactions
         loadDashboardStats();
@@ -1260,22 +1393,11 @@ document.addEventListener('DOMContentLoaded', function() {
             // Then get data from server if online and sync to IndexedDB
             if (navigator.onLine) {
                 try {
-                    const response = await fetch('/api/purchases');
-                    if (response.ok) {
-                        const serverTransactions = await response.json();
-
+                    const serverTransactions = await syncPurchasesFromGoogleSheets();
+                    
+                    if (serverTransactions !== null) {
                         // Filter out pending deletions
                         const filteredServerTransactions = serverTransactions.filter(t => !pendingDeletions.has(t.transactionId));
-
-                        // Clear old synced data and save fresh data to IndexedDB
-                        if (db) {
-                            await clearSyncedPurchases();
-                            for (const txn of filteredServerTransactions) {
-                                if (txn.transactionId) {
-                                    await saveSyncedPurchase(txn);
-                                }
-                            }
-                        }
 
                         // Combine with pending
                         const seenIds = new Set(transactions.map(t => t.transactionId));
@@ -1284,9 +1406,18 @@ document.addEventListener('DOMContentLoaded', function() {
                                 transactions.push(serverTxn);
                             }
                         }
+                    } else if (db) {
+                        // If sync failed (returned null), fallback to IndexedDB data
+                        const syncedPurchases = await getAllSyncedPurchases();
+                        const seenIds = new Set(transactions.map(t => t.transactionId));
+                        for (const synced of syncedPurchases) {
+                            if (!seenIds.has(synced.transactionId) && !pendingDeletions.has(synced.transactionId)) {
+                                transactions.push(synced);
+                            }
+                        }
                     }
                 } catch (error) {
-                    console.error('Error fetching daily in transactions from server:', error);
+                    console.error('Error in loadDailyInTransactions sync:', error);
                 }
             } else if (db) {
                 // If offline, merge local pending with synced data from IndexedDB
@@ -1412,22 +1543,11 @@ document.addEventListener('DOMContentLoaded', function() {
             // Then try to get data from server if online and sync to IndexedDB
             if (navigator.onLine) {
                 try {
-                    const response = await fetch('/api/transfers');
-                    if (response.ok) {
-                        const serverTransactions = await response.json();
-
+                    const serverTransactions = await syncTransfersFromGoogleSheets();
+                    
+                    if (serverTransactions !== null) {
                         // Filter out deletions
                         const filteredServerTransactions = serverTransactions.filter(t => !pendingDeletions.has(t.transactionId));
-
-                        // Clear old synced data and save fresh data to IndexedDB
-                        if (db) {
-                            await clearSyncedTransfers();
-                            for (const txn of filteredServerTransactions) {
-                                if (txn.transactionId) {
-                                    await saveSyncedTransfer(txn);
-                                }
-                            }
-                        }
 
                         // Combine with pending
                         const seenIds = new Set(transactions.map(t => t.transactionId));
@@ -1436,9 +1556,19 @@ document.addEventListener('DOMContentLoaded', function() {
                                 transactions.push(serverTxn);
                             }
                         }
+                    } else if (db) {
+                        // If sync failed (returned null), fallback to IndexedDB data
+                        const syncedTransfers = await getAllSyncedTransfers();
+                        const seenIds = new Set(transactions.map(t => t.transactionId));
+                        for (const synced of syncedTransfers) {
+                            const id = synced.transactionId || synced.id;
+                            if (!seenIds.has(id) && !pendingDeletions.has(id)) {
+                                transactions.push(synced);
+                            }
+                        }
                     }
                 } catch (error) {
-                    console.error('Error fetching transfer transactions from server:', error);
+                    console.error('Error in loadTransferTransactions sync:', error);
                 }
             } else if (db) {
                 // If offline, merge local pending with synced data from IndexedDB
@@ -1741,9 +1871,14 @@ document.addEventListener('DOMContentLoaded', function() {
     // Function to load purchased items list
     async function loadPurchasedItemsList() {
         try {
+            // If online, always try to sync first to get latest from Google Sheets
+            if (navigator.onLine) {
+                await syncPurchasesFromGoogleSheets();
+            }
+
             let transactions = [];
             
-            // First try to get data from local IndexedDB
+            // Try to get data from local IndexedDB (which is now synced if we were online)
             if (db) {
                 const allPending = await getAllPendingPurchasesHelper();
                 const allSynced = await getAllSyncedPurchases();
@@ -1779,33 +1914,6 @@ document.addEventListener('DOMContentLoaded', function() {
                         seenIds.add(id);
                         transactions.push(synced);
                     }
-                }
-            }
-            
-            // If no local data and online, try to get from server
-            if (transactions.length === 0 && navigator.onLine) {
-                try {
-                    const response = await fetch('/api/purchases');
-                    if (response.ok) {
-                        const serverTransactions = await response.json();
-                        
-                        // Again, filter out anything we know is deleted locally
-                        const allPending = await getAllPendingPurchasesHelper();
-                        const pendingDeletions = new Set(
-                            allPending
-                                .filter(item => item.action === 'delete' || item.type === 'purchase_deletion')
-                                .map(item => item.transactionId || item.id)
-                        );
-                        
-                        transactions = serverTransactions.filter(t => !pendingDeletions.has(t.transactionId));
-                        
-                        // Store in local IndexedDB (only those not deleted)
-                        for (const transaction of transactions) {
-                            await saveSyncedPurchase(transaction);
-                        }
-                    }
-                } catch (error) {
-                    console.error('Error fetching from server for purchased items:', error);
                 }
             }
             
@@ -2145,7 +2253,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
                     <div class="input-group">
                         <label for="transfer-quantity">Quantity</label>
-                        <input type="number" id="transfer-quantity" min="1" required>
+                        <input type="number" id="transfer-quantity" required>
                     </div>
 
                     <div class="input-group">
@@ -3237,7 +3345,7 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
             modalHtml += `
                             <div class="input-group">
                                 <label for="edit-quantity">Quantity</label>
-                                <input type="number" id="edit-quantity" value="${transactionData.quantity || ''}" min="1" required>
+                                <input type="number" id="edit-quantity" value="${transactionData.quantity || ''}" required>
                             </div>
 
                             <div class="input-group">
