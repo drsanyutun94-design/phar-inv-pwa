@@ -253,6 +253,11 @@ app.post('/api/purchases', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // Validate price and quantity
+    if (parseFloat(totalPrice) < 0 || parseInt(packageScheme.numberOfBoxes) <= 0) {
+      return res.status(400).json({ error: 'Total price and number of boxes must be positive' });
+    }
+
     // Handle payment methods - parse "amount by method" format and distribute across columns K, L, M, N, O, P
     const paymentMethodsArray = paymentMethods || [];
     const paymentData = [];
@@ -662,6 +667,12 @@ app.post('/api/transfers', async (req, res) => {
 
     if (!itemCode || !itemName || (quantity === undefined || quantity === null || quantity === '') || !direction || !date) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Validate quantity is a non-zero number
+    const qty = parseInt(quantity);
+    if (isNaN(qty) || qty === 0) {
+      return res.status(400).json({ error: 'Quantity must be a non-zero number' });
     }
 
     const range = 'Transfer!A:G'; 

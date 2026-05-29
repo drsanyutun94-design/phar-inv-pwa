@@ -87,16 +87,25 @@ class OfflineDataManager {
                     });
 
                     if (purchaseResponse.ok && expiryResponse.ok) {
-                        // Mark as synced successfully
-                        await window.updatePendingPurchaseStatus(purchase.transactionId || purchase.id, 'synced');
-                        successfulSyncs++;
-                        console.log(`Successfully synced purchase ${purchase.transactionId || purchase.id}`);
+                       // Update local synced storage before updating pending status
+                       if (purchase.purchaseData) {
+                           await window.saveSyncedPurchase(purchase.purchaseData);
+                       }
+
+                       // Mark as synced successfully
+                       await window.updatePendingPurchaseStatus(purchase.transactionId || purchase.id, 'synced');
+                       successfulSyncs++;
+                       console.log(`Successfully synced purchase ${purchase.transactionId || purchase.id}`);
                     } else {
-                        // Keep as pending if sync failed
-                        console.error(`Failed to sync purchase ${purchase.transactionId || purchase.id}: Server returned error`);
-                        failedSyncs++;
-                    }
-                } catch (error) {
+                       // Keep as pending if sync failed
+                       let errorMsg = 'Server returned error';
+                       try {
+                           const errorData = !purchaseResponse.ok ? await purchaseResponse.json() : await expiryResponse.json();
+                           if (errorData.error) errorMsg = errorData.error;
+                       } catch (e) {}
+                       console.error(`Failed to sync purchase ${purchase.transactionId || purchase.id}: ${errorMsg}`);
+                       failedSyncs++;
+                    }                } catch (error) {
                     console.error(`Error syncing purchase ${purchase.transactionId || purchase.id}:`, error);
                     failedSyncs++;
                 }
@@ -150,13 +159,21 @@ class OfflineDataManager {
                     });
 
                     if (transferResponse.ok) {
+                        // Update local synced storage before updating pending status
+                        await window.saveSyncedTransfer(transfer);
+
                         // Mark as synced successfully
                         await window.updatePendingTransferStatus(transfer.transactionId, 'synced');
                         successfulSyncs++;
                         console.log(`Successfully synced transfer ${transfer.transactionId}`);
                     } else {
                         // Keep as pending if sync failed
-                        console.error(`Failed to sync transfer ${transfer.transactionId}: Server returned error`);
+                        let errorMsg = 'Server returned error';
+                        try {
+                            const errorData = await transferResponse.json();
+                            if (errorData.error) errorMsg = errorData.error;
+                        } catch (e) {}
+                        console.error(`Failed to sync transfer ${transfer.transactionId}: ${errorMsg}`);
                         failedSyncs++;
                     }
                 } catch (error) {
@@ -309,6 +326,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let lastSupplier = '';
     let lastTransferDirection = '';
     let lastFocReason = '';
+    let lastPaymentMethods = [{ amount: '', method: '' }];
     let isInitializing = false;
     let dbPromise = null;
 
@@ -1111,13 +1129,23 @@ document.addEventListener('DOMContentLoaded', function() {
                 try {
                     const allPending = await getAllPendingPurchasesHelper();
                     const serverTransactionIds = new Set(serverTransactions.map(t => t.transactionId));
+                    const now = new Date();
                     
                     for (const pending of allPending) {
-                        // If it's a purchase 'add' or 'edit' that isn't on the server anymore, it was likely deleted from the sheet
-                        if (pending.type === 'purchase' && (pending.action === 'add' || pending.action === 'edit')) {
-                            if (!serverTransactionIds.has(pending.transactionId)) {
-                                console.log(`Reconciliation: Removing orphaned pending purchase ${pending.transactionId} (not found in Google Sheets)`);
-                                await deletePendingPurchase(pending.transactionId);
+                        if (pending.type === 'purchase' || pending.type === 'purchase_deletion' || pending.type === 'purchase_update') {
+                            const id = pending.transactionId || pending.id;
+                            if (serverTransactionIds.has(id)) {
+                                // It's confirmed on server, remove from pending
+                                console.log(`Reconciliation: Removing confirmed pending purchase ${id}`);
+                                await deletePendingPurchase(id);
+                            } else if (pending.status === 'synced') {
+                                // Marked as synced but not on server yet. Check if it's old enough (5 mins)
+                                // to assume it was manually deleted from the spreadsheet
+                                const syncTime = new Date(pending.timestamp);
+                                if (now - syncTime > 5 * 60 * 1000) {
+                                    console.log(`Reconciliation: Removing orphaned pending purchase ${id} (not found on server after 5 mins)`);
+                                    await deletePendingPurchase(id);
+                                }
                             }
                         }
                     }
@@ -1180,13 +1208,22 @@ document.addEventListener('DOMContentLoaded', function() {
                 try {
                     const allPending = await getAllPendingPurchasesHelper();
                     const serverTransactionIds = new Set(serverTransactions.map(t => t.transactionId));
+                    const now = new Date();
                     
                     for (const pending of allPending) {
-                        // If it's a transfer that isn't on the server anymore, it was likely deleted from the sheet
-                        if (pending.type === 'transfer') {
-                            if (!serverTransactionIds.has(pending.transactionId)) {
-                                console.log(`Reconciliation: Removing orphaned pending transfer ${pending.transactionId} (not found in Google Sheets)`);
-                                await deletePendingPurchase(pending.transactionId);
+                        if (pending.type === 'transfer' || pending.type === 'transfer_deletion' || pending.type === 'transfer_update') {
+                            const id = pending.transactionId || pending.id;
+                            if (serverTransactionIds.has(id)) {
+                                // It's confirmed on server, remove from pending
+                                console.log(`Reconciliation: Removing confirmed pending transfer ${id}`);
+                                await deletePendingPurchase(id);
+                            } else if (pending.status === 'synced') {
+                                // Marked as synced but not on server yet. Check if it's old enough (5 mins)
+                                const syncTime = new Date(pending.timestamp);
+                                if (now - syncTime > 5 * 60 * 1000) {
+                                    console.log(`Reconciliation: Removing orphaned pending transfer ${id} (not found on server after 5 mins)`);
+                                    await deletePendingPurchase(id);
+                                }
                             }
                         }
                     }
@@ -1221,19 +1258,19 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    function loadTab(tabName) {
+    function loadTab(tabName, skipSync = false) {
         switch(tabName) {
             case 'dashboard':
-                loadDashboard();
+                loadDashboard(skipSync);
                 break;
             case 'search':
                 loadSearchTab();
                 break;
             case 'add':
-                loadAddTab();
+                loadAddTab(skipSync);
                 break;
             case 'transfer':
-                loadTransferTab();
+                loadTransferTab(skipSync);
                 break;
             case 'lowstock':
                 loadLowStockTab();
@@ -1242,11 +1279,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 loadExpiredDateTab();
                 break;
             default:
-                loadDashboard();
+                loadDashboard(skipSync);
         }
     }
 
-    function loadDashboard() {
+    function loadDashboard(skipSync = false) {
         mainContent.innerHTML = `
             <div class="card">
                 <h2>Pharma Inventory Dashboard</h2>
@@ -1310,7 +1347,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // Load stats and transactions
         loadDashboardStats();
-        loadDailyInTransactions();
+        loadDailyInTransactions(skipSync);
     }
 
     async function loadDashboardStats() {
@@ -1365,7 +1402,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    async function loadDailyInTransactions() {
+    async function loadDailyInTransactions(skipSync = false) {
         try {
             let transactions = [];
 
@@ -1391,7 +1428,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
 
             // Then get data from server if online and sync to IndexedDB
-            if (navigator.onLine) {
+            if (navigator.onLine && !skipSync) {
                 try {
                     const serverTransactions = await syncPurchasesFromGoogleSheets();
                     
@@ -1460,14 +1497,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 const totalPrice = transaction.totalPrice || 'N/A';
 
                 transactionsHtml += `
-                    <tr data-id="${id}" data-type="daily-in" class="${transaction.isPending ? 'pending-row' : ''}">
+                    <tr data-id="${id}" data-type="purchase" class="${transaction.isPending ? 'pending-row' : ''}">
                         <td>${date}</td>
                         <td>${itemName}</td>
                         <td>${quantity}</td>
                         <td>${totalPrice}</td>
                         <td>
-                            <button class="btn-edit" onclick="showTransactionInAddForm('${id}', 'daily-in')">Edit</button>
-                            <button class="btn-delete" onclick="deleteTransaction('${id}', 'daily-in')">Delete</button>
+                            <button class="btn-edit" onclick="showTransactionInAddForm('${id}', 'purchase')">Edit</button>
+                            <button class="btn-delete" onclick="deleteTransaction('${id}', 'purchase')">Delete</button>
                         </td>
                     </tr>
                 `;
@@ -1515,7 +1552,7 @@ document.addEventListener('DOMContentLoaded', function() {
         safeSetHTML(containerId, transactionsHtml);
     }
 
-    async function loadTransferTransactions() {
+    async function loadTransferTransactions(filterQuery = '', skipSync = false) {
         try {
             let transactions = [];
 
@@ -1525,44 +1562,48 @@ document.addEventListener('DOMContentLoaded', function() {
             // Get pending deletions
             const pendingDeletions = new Set(
                 allPending
-                    .filter(item => item.action === 'delete' || item.type === 'transfer_deletion')
-                    .map(item => item.transactionId || item.id)
+                    .filter(item => item.action === 'delete' || String(item.type).includes('deletion'))
+                    .map(item => String(item.transactionId || item.id))
             );
+
+            console.log('Pending deletions found:', Array.from(pendingDeletions));
 
             if (db) {
                 // Filter to get only transfer transactions
                 const transferTransactions = allPending
-                    .filter(item => item.type === 'transfer' && !pendingDeletions.has(item.transactionId))
+                    .filter(item => item.type === 'transfer' && !pendingDeletions.has(String(item.transactionId)))
                     .map(item => ({
                         ...item,
                         isPending: true
                     }));
+                
+                console.log(`Found ${transferTransactions.length} local pending transfers after filtering`);
                 transactions = [...transactions, ...transferTransactions];
             }
 
             // Then try to get data from server if online and sync to IndexedDB
-            if (navigator.onLine) {
+            if (navigator.onLine && !skipSync) {
                 try {
                     const serverTransactions = await syncTransfersFromGoogleSheets();
                     
                     if (serverTransactions !== null) {
                         // Filter out deletions
-                        const filteredServerTransactions = serverTransactions.filter(t => !pendingDeletions.has(t.transactionId));
+                        const filteredServerTransactions = serverTransactions.filter(t => !pendingDeletions.has(String(t.transactionId)));
 
                         // Combine with pending
-                        const seenIds = new Set(transactions.map(t => t.transactionId));
+                        const seenIds = new Set(transactions.map(t => String(t.transactionId)));
                         for (const serverTxn of filteredServerTransactions) {
-                            if (!seenIds.has(serverTxn.transactionId)) {
+                            if (!seenIds.has(String(serverTxn.transactionId))) {
                                 transactions.push(serverTxn);
                             }
                         }
                     } else if (db) {
                         // If sync failed (returned null), fallback to IndexedDB data
                         const syncedTransfers = await getAllSyncedTransfers();
-                        const seenIds = new Set(transactions.map(t => t.transactionId));
+                        const seenIds = new Set(transactions.map(t => String(t.transactionId)));
                         for (const synced of syncedTransfers) {
                             const id = synced.transactionId || synced.id;
-                            if (!seenIds.has(id) && !pendingDeletions.has(id)) {
+                            if (!seenIds.has(String(id)) && !pendingDeletions.has(String(id))) {
                                 transactions.push(synced);
                             }
                         }
@@ -1574,13 +1615,22 @@ document.addEventListener('DOMContentLoaded', function() {
                 // If offline, merge local pending with synced data from IndexedDB
                 const syncedTransfers = await getAllSyncedTransfers();
                 // Combine synced server data with local pending, avoiding duplicates and respect deletions
-                const seenIds = new Set(transactions.map(t => t.transactionId));
+                const seenIds = new Set(transactions.map(t => String(t.transactionId)));
                 for (const synced of syncedTransfers) {
                     const id = synced.transactionId || synced.id;
-                    if (!seenIds.has(id) && !pendingDeletions.has(id)) {
+                    if (!seenIds.has(String(id)) && !pendingDeletions.has(String(id))) {
                         transactions.push(synced);
                     }
                 }
+            }
+
+            // Filter by item name if query is provided
+            if (filterQuery) {
+                const query = filterQuery.toLowerCase();
+                transactions = transactions.filter(t => {
+                    const itemName = (t.itemName || '').toLowerCase();
+                    return itemName.includes(query);
+                });
             }
 
             // Sort by date (descending)
@@ -1596,9 +1646,25 @@ document.addEventListener('DOMContentLoaded', function() {
             const foc = transactions.filter(t => t.direction === 'foc-clinic-discard');
 
             // Render the tables - only show reason for FOC
-            renderTransferTable('transfer-transactions-main-to-sub', mainToSub, false);
-            renderTransferTable('transfer-transactions-sub-to-main', subToMain, false);
-            renderTransferTable('transfer-transactions-foc', foc, true);
+            const noResultsMsg = filterQuery ? '<p>No matching transactions found</p>' : '<p>No transactions found</p>';
+            
+            if (mainToSub.length > 0) {
+                renderTransferTable('transfer-transactions-main-to-sub', mainToSub, false);
+            } else {
+                safeSetHTML('transfer-transactions-main-to-sub', noResultsMsg);
+            }
+            
+            if (subToMain.length > 0) {
+                renderTransferTable('transfer-transactions-sub-to-main', subToMain, false);
+            } else {
+                safeSetHTML('transfer-transactions-sub-to-main', noResultsMsg);
+            }
+            
+            if (foc.length > 0) {
+                renderTransferTable('transfer-transactions-foc', foc, true);
+            } else {
+                safeSetHTML('transfer-transactions-foc', noResultsMsg);
+            }
 
         } catch (error) {
             console.error('Error loading transfer transactions:', error);
@@ -1692,7 +1758,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    function loadAddTab() {
+    function loadAddTab(skipSync = false) {
         mainContent.innerHTML = `
             <div class="card">
                 <h2>Add New Item / Purchase</h2>
@@ -1740,11 +1806,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     <div class="input-group">
                         <label>Payment Method</label>
                         <div id="payment-methods-container">
-                            <div class="payment-method-row">
-                                <input type="number" class="payment-amount-input" placeholder="Amount" min="0" step="0.01" required>
-                                <input type="text" class="payment-method-input" placeholder="Method (e.g., cash, card)" required>
-                                <button type="button" class="remove-payment-btn" onclick="removePaymentMethod(this)" style="display: none;">-</button>
-                            </div>
+                            ${lastPaymentMethods.map((pm, index) => `
+                                <div class="payment-method-row">
+                                    <input type="number" class="payment-amount-input" placeholder="Amount" min="0" step="0.01" value="${pm.amount}" required>
+                                    <input type="text" class="payment-method-input" placeholder="Method (e.g., cash, card)" value="${pm.method}" required>
+                                    <button type="button" class="remove-payment-btn" onclick="removePaymentMethod(this)" style="${lastPaymentMethods.length > 1 ? '' : 'display: none;'}">-</button>
+                                </div>
+                            `).join('')}
                         </div>
                         <button type="button" class="btn add-payment-btn" onclick="addPaymentMethod()">+ Add Payment Method</button>
                         <div id="payment-validation-message" class="payment-validation"></div>
@@ -1756,6 +1824,10 @@ document.addEventListener('DOMContentLoaded', function() {
             
             <div class="card">
                 <h3>Recent Purchases</h3>
+                <div class="search-container" style="margin-bottom: 15px;">
+                    <input type="text" class="search-input" id="purchase-list-search" placeholder="Search by item name...">
+                    <span class="material-icons search-icon">search</span>
+                </div>
                 <div id="purchased-items-list">
                     <p>Loading purchases...</p>
                 </div>
@@ -1781,6 +1853,14 @@ document.addEventListener('DOMContentLoaded', function() {
             handleItemSearch(e, suggestionsDiv);
         }, 300));
 
+        // Set up search for purchases list
+        const purchaseListSearch = document.getElementById('purchase-list-search');
+        if (purchaseListSearch) {
+            purchaseListSearch.addEventListener('input', debounce(function(e) {
+                loadPurchasedItemsList(e.target.value.trim(), true);
+            }, 300));
+        }
+
         // Payment method functions
         window.addPaymentMethod = function() {
             const container = document.getElementById('payment-methods-container');
@@ -1794,6 +1874,7 @@ document.addEventListener('DOMContentLoaded', function() {
             container.appendChild(paymentRow);
             updateRemoveButtons();
             autoDistributePayment();
+            updateLastPaymentMethods();
         };
 
         window.removePaymentMethod = function(button) {
@@ -1802,13 +1883,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 button.parentElement.remove();
                 updateRemoveButtons();
                 autoDistributePayment();
+                updateLastPaymentMethods();
             }
         };
 
-        // Add event listeners to payment amount inputs for validation
+        // Add event listeners to payment amount inputs for validation and persistence
         document.addEventListener('input', function(e) {
-            if (e.target.classList.contains('payment-amount-input')) {
-                validatePaymentTotal();
+            if (e.target.classList.contains('payment-amount-input') || e.target.classList.contains('payment-method-input')) {
+                if (e.target.classList.contains('payment-amount-input')) {
+                    validatePaymentTotal();
+                }
+                updateLastPaymentMethods();
             }
         });
 
@@ -1862,17 +1947,17 @@ document.addEventListener('DOMContentLoaded', function() {
         });
 
         // Load purchased items list
-        loadPurchasedItemsList();
+        loadPurchasedItemsList('', skipSync);
         
         // Set up form submission handler
         document.getElementById('add-item-form').addEventListener('submit', handleAddItemSubmit);
     }
 
     // Function to load purchased items list
-    async function loadPurchasedItemsList() {
+    async function loadPurchasedItemsList(filterQuery = '', skipSync = false) {
         try {
-            // If online, always try to sync first to get latest from Google Sheets
-            if (navigator.onLine) {
+            // If online, try to sync unless skipSync is true
+            if (navigator.onLine && !skipSync) {
                 await syncPurchasesFromGoogleSheets();
             }
 
@@ -1887,13 +1972,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 const pendingDeletions = new Set(
                     allPending
                         .filter(item => item.action === 'delete' || item.type === 'purchase_deletion')
-                        .map(item => item.transactionId || item.id)
+                        .map(item => String(item.transactionId || item.id))
                 );
 
                 // Normalize and combine transactions
                 // Pending purchases have nested purchaseData, synced purchases are flat
                 const normalizedPending = allPending
-                    .filter(item => item.type === 'purchase' && !pendingDeletions.has(item.transactionId))
+                    .filter(item => item.type === 'purchase' && !pendingDeletions.has(String(item.transactionId)))
                     .map(item => ({
                         ...item.purchaseData,
                         transactionId: item.transactionId,
@@ -1904,21 +1989,30 @@ document.addEventListener('DOMContentLoaded', function() {
                 const seenIds = new Set();
                 
                 for (const pending of normalizedPending) {
-                    seenIds.add(pending.transactionId);
+                    seenIds.add(String(pending.transactionId));
                     transactions.push(pending);
                 }
                 
                 for (const synced of allSynced) {
                     const id = synced.transactionId || synced.id;
-                    if (!seenIds.has(id) && !pendingDeletions.has(id)) {
-                        seenIds.add(id);
+                    if (!seenIds.has(String(id)) && !pendingDeletions.has(String(id))) {
+                        seenIds.add(String(id));
                         transactions.push(synced);
                     }
                 }
             }
             
+            // Filter by item name if query is provided
+            if (filterQuery) {
+                const query = filterQuery.toLowerCase();
+                transactions = transactions.filter(t => {
+                    const itemName = (t.itemName || t.name || '').toLowerCase();
+                    return itemName.includes(query);
+                });
+            }
+
             if (transactions.length === 0) {
-                safeSetHTML('purchased-items-list', '<p>No purchases found</p>');
+                safeSetHTML('purchased-items-list', `<p>${filterQuery ? 'No matching purchases found' : 'No purchases found'}</p>`);
                 return;
             }
 
@@ -2107,7 +2201,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 await addPendingPurchase(transactionRecord);
 
                 // Step 3: Update UI immediately
-                await loadPurchasedItemsList();
+                await loadPurchasedItemsList('', true);
                 alert('Purchase transaction deleted successfully');
 
                 // Step 4: Try to sync with server if online (non-blocking)
@@ -2217,9 +2311,32 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                     
                     if (response.ok) {
-                        // Remove the pending transaction after successful sync
-                        await deletePendingPurchase(transaction.transactionId);
-                        console.log(`Synced ${transaction.action} transaction: ${transaction.transactionId}`);
+                        // Update local synced storage before updating pending status to ensure UI consistency
+                        if (transaction.type === 'purchase') {
+                            if (transaction.action === 'add' || transaction.action === 'edit') {
+                                await saveSyncedPurchase(transaction.purchaseData);
+                            } else if (transaction.action === 'delete') {
+                                await deleteSyncedPurchase(transaction.transactionId);
+                            }
+                        } else if (transaction.type === 'transfer') {
+                            if (transaction.action === 'add' || transaction.action === 'edit' || !transaction.action) {
+                                // For transfers, the data is at the top level or in transferData
+                                const transferData = transaction.transferData || transaction;
+                                await saveSyncedTransfer(transferData);
+                            } else if (transaction.action === 'delete') {
+                                await deleteSyncedTransfer(transaction.transactionId);
+                            }
+                        }
+
+                        // Mark as synced instead of deleting immediately to avoid gaps
+                        // Reconciliation in syncFromGoogleSheets will handle final removal
+                        if (transaction.type === 'purchase') {
+                            await updatePendingPurchaseStatus(transaction.transactionId, 'synced');
+                        } else if (transaction.type === 'transfer') {
+                            await updatePendingTransferStatus(transaction.transactionId, 'synced');
+                        }
+                        
+                        console.log(`Synced ${transaction.action || 'processed'} ${transaction.type} transaction: ${transaction.transactionId}`);
                     } else {
                         console.error(`Failed to sync ${transaction.action} transaction: ${transaction.transactionId}`);
                     }
@@ -2235,7 +2352,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    function loadTransferTab() {
+    function loadTransferTab(skipSync = false) {
         mainContent.innerHTML = `
             <div class="card">
                 <h2>Transfer Stock</h2>
@@ -2271,21 +2388,23 @@ document.addEventListener('DOMContentLoaded', function() {
             </div>
 
             <div class="card">
-                <h3>Main Store to Sub Store</h3>
+                <h3>Transfer Transactions</h3>
+                <div class="search-container" style="margin-bottom: 15px;">
+                    <input type="text" class="search-input" id="transfer-list-search" placeholder="Search by item name...">
+                    <span class="material-icons search-icon">search</span>
+                </div>
+                
+                <h4>Main Store to Sub Store</h4>
                 <div id="transfer-transactions-main-to-sub">
                     <p>Loading transactions...</p>
                 </div>
-            </div>
 
-            <div class="card">
-                <h3>Sub Store to Main Store</h3>
+                <h4 style="margin-top: 20px;">Sub Store to Main Store</h4>
                 <div id="transfer-transactions-sub-to-main">
                     <p>Loading transactions...</p>
                 </div>
-            </div>
 
-            <div class="card">
-                <h3>FOC / Clinic / Discard</h3>
+                <h4 style="margin-top: 20px;">FOC / Clinic / Discard</h4>
                 <div id="transfer-transactions-foc">
                     <p>Loading transactions...</p>
                 </div>
@@ -2303,8 +2422,16 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         }
 
+        // Set up search for transfer list
+        const transferListSearch = document.getElementById('transfer-list-search');
+        if (transferListSearch) {
+            transferListSearch.addEventListener('input', debounce(function(e) {
+                loadTransferTransactions(e.target.value.trim(), true);
+            }, 300));
+        }
+
         // Load transfer transactions
-        loadTransferTransactions();
+        loadTransferTransactions('', skipSync);
         
         // Add event listener for item search
         transferItemSearch.addEventListener('input', debounce(function(e) {
@@ -2587,10 +2714,26 @@ async function loadLowStockData() {
     // Update remove buttons visibility for payment methods
     function updateRemoveButtons() {
         const container = document.getElementById('payment-methods-container');
+        if (!container) return;
         const removeButtons = container.querySelectorAll('.remove-payment-btn');
         removeButtons.forEach(btn => {
             btn.style.display = container.children.length > 1 ? 'inline-block' : 'none';
         });
+    }
+
+    // Update last payment methods state for persistence
+    function updateLastPaymentMethods() {
+        const amountInputs = document.querySelectorAll('.payment-amount-input');
+        const methodInputs = document.querySelectorAll('.payment-method-input');
+        if (amountInputs.length === 0) return;
+        
+        lastPaymentMethods = [];
+        for (let i = 0; i < amountInputs.length; i++) {
+            lastPaymentMethods.push({
+                amount: amountInputs[i].value,
+                method: methodInputs[i].value
+            });
+        }
     }
 
     async function handleAddItemSubmit(event) {
@@ -2643,6 +2786,12 @@ async function loadLowStockData() {
         const numberOfBoxes = parseInt(document.getElementById('pack-number-of-boxes').value) || 0;
         const expiredDate = document.getElementById('expired-date').value;
         const supplier = document.getElementById('supplier').value;
+
+        // Validate required fields
+        if (!itemName || !purchaseDate || isNaN(totalPrice) || totalPrice < 0 || isNaN(numberOfBoxes) || numberOfBoxes <= 0 || !expiredDate) {
+            alert('Please fill in all required fields with valid data (quantity and price must be positive)');
+            return;
+        }
 
         // Check if the item exists in the database
         const allItems = await getAllItems();
@@ -2752,6 +2901,17 @@ async function loadLowStockData() {
                 type: 'purchase'
             });
 
+            // Save current payment methods to persist them after reset
+            const currentAmountInputs = document.querySelectorAll('.payment-amount-input');
+            const currentMethodInputs = document.querySelectorAll('.payment-method-input');
+            lastPaymentMethods = [];
+            for (let i = 0; i < currentAmountInputs.length; i++) {
+                lastPaymentMethods.push({
+                    amount: currentAmountInputs[i].value,
+                    method: currentMethodInputs[i].value
+                });
+            }
+
             // Update UI immediately
             document.getElementById('add-item-form').reset();
             
@@ -2767,22 +2927,16 @@ async function loadLowStockData() {
                 purchaseDateInput.value = today;
             }
             
-            // Clear payment methods container inputs
+            // Restore payment methods container inputs instead of clearing them
             const paymentMethodsContainer = document.getElementById('payment-methods-container');
             if (paymentMethodsContainer) {
-                const inputs = paymentMethodsContainer.querySelectorAll('input[type="text"], input[type="number"]');
-                inputs.forEach(input => input.value = '');
-                
-                // Also reset to a single row if multiple rows exist
-                if (paymentMethodsContainer.children.length > 1) {
-                    paymentMethodsContainer.innerHTML = `
-                        <div class="payment-method-row">
-                            <input type="number" class="payment-amount-input" placeholder="Amount" min="0" step="0.01" required>
-                            <input type="text" class="payment-method-input" placeholder="Method (e.g., cash, card)" required>
-                            <button type="button" class="remove-payment-btn" onclick="removePaymentMethod(this)" style="display: none;">-</button>
-                        </div>
-                    `;
-                }
+                paymentMethodsContainer.innerHTML = lastPaymentMethods.map((pm, index) => `
+                    <div class="payment-method-row">
+                        <input type="number" class="payment-amount-input" placeholder="Amount" min="0" step="0.01" value="${pm.amount}" required>
+                        <input type="text" class="payment-method-input" placeholder="Method (e.g., cash, card)" value="${pm.method}" required>
+                        <button type="button" class="remove-payment-btn" onclick="removePaymentMethod(this)" style="${lastPaymentMethods.length > 1 ? '' : 'display: none;'}">-</button>
+                    </div>
+                `).join('');
                 
                 // Clear validation message
                 const validationMessage = document.getElementById('payment-validation-message');
@@ -2799,7 +2953,7 @@ async function loadLowStockData() {
                 transactionIdElement.textContent = '-';
             }
             document.getElementById('item-suggestions').classList.add('hidden');
-            await loadPurchasedItemsList();
+            await loadPurchasedItemsList('', true);
 
             if (window.offlineManager) {
                 window.offlineManager.hideLoadingMessage();
@@ -2847,6 +3001,13 @@ async function loadLowStockData() {
         const itemName = document.getElementById('transfer-item-search').value;
         const quantity = parseInt(document.getElementById('transfer-quantity').value);
         const direction = document.getElementById('transfer-direction').value;
+
+        // Validate quantity
+        if (isNaN(quantity) || quantity === 0) {
+            alert('Please enter a valid quantity');
+            return;
+        }
+
         const date = new Date().toISOString().split('T')[0]; // Today's date
 
         // Look up the item code based on the name from local storage
@@ -2966,7 +3127,7 @@ async function loadLowStockData() {
 
             // Refresh transfer transactions list if we're on that tab
             if (typeof loadTransferTransactions === 'function') {
-                await loadTransferTransactions();
+                await loadTransferTransactions('', true);
             }
 
             // 3. Attempt sync if online (background task)
@@ -3010,7 +3171,7 @@ async function loadLowStockData() {
                 type: 'transfer' // Differentiate from purchases
             };
 
-            const request = objectStore.add(transferRecord);
+            const request = objectStore.put(transferRecord);
 
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error);
@@ -3249,9 +3410,8 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
         try {
             // Get transaction data based on type
             let transactionData = null;
-            
-            if (type === 'daily-in') {
-                // Get all daily transactions to find the specific one
+
+            if (type === 'purchase' || type === 'daily-in') {                // Get all daily transactions to find the specific one
                 const response = await fetch('/api/purchases');
                 if (!response.ok) {
                     console.error('Error fetching transactions for edit:', response.statusText);
@@ -3429,8 +3589,8 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
             }
 
             // Validate required fields
-            if (!updatedData.itemName || !updatedData.date || !updatedData.quantity) {
-                alert('Please fill in all required fields');
+            if (!updatedData.itemName || !updatedData.date || isNaN(updatedData.quantity) || updatedData.quantity === 0) {
+                alert('Please fill in all required fields with valid data');
                 return;
             }
 
@@ -3466,7 +3626,7 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
             // Remove the modal
             document.body.removeChild(modal);
             // Reload the dashboard to reflect changes
-            loadDashboard();
+            loadDashboard(true);
 
             // If online, try to sync in the background
             if (navigator.onLine) {
@@ -3511,12 +3671,15 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
             getAllRequest.onsuccess = function() {
                 const records = getAllRequest.result;
 
-                // Find the matching record
-                const matchingRecord = records.find(r =>
-                    (r.transactionId && String(r.transactionId) === String(updatedData.id)) ||
-                    (r.itemCode && r.itemCode === updatedData.id) ||
-                    (r.id !== undefined && String(r.id) === String(updatedData.id))
-                );
+                // Find the matching record - skip deletion records to avoid overwriting them
+                const matchingRecord = records.find(r => {
+                    const isDeletion = r.type && String(r.type).includes('deletion');
+                    if (isDeletion) return false;
+
+                    return (r.transactionId && String(r.transactionId) === String(updatedData.id)) ||
+                           (r.itemCode && r.itemCode === updatedData.id) ||
+                           (r.id !== undefined && String(r.id) === String(updatedData.id));
+                });
 
                 if (matchingRecord) {
                     // Update the record with new data
@@ -3563,12 +3726,15 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
             getAllRequest.onsuccess = function() {
                 const records = getAllRequest.result;
 
-                // Find the matching record
-                const matchingRecord = records.find(r =>
-                    (r.transactionId && String(r.transactionId) === String(id)) ||
-                    (r.itemCode && r.itemCode === id) ||
-                    (r.id !== undefined && String(r.id) === String(id))
-                );
+                // Find the matching record - skip deletion records to avoid removing the deletion request itself
+                const matchingRecord = records.find(r => {
+                    const isDeletion = r.type && String(r.type).includes('deletion');
+                    if (isDeletion) return false;
+
+                    return (r.transactionId && String(r.transactionId) === String(id)) ||
+                           (r.itemCode && r.itemCode === id) ||
+                           (r.id !== undefined && String(r.id) === String(id));
+                });
 
                 if (matchingRecord) {
                     const deleteRequest = objectStore.delete(matchingRecord.transactionId || matchingRecord.id);
@@ -3576,7 +3742,7 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
                     deleteRequest.onerror = () => reject(deleteRequest.error);
                 } else {
                     // Also check synced stores
-                    if (type === 'daily-in') {
+                    if (type === 'purchase' || type === 'daily-in') {
                         deleteSyncedPurchase(id).then(resolve).catch(reject);
                     } else if (type === 'transfer') {
                         deleteSyncedTransfer(id).then(resolve).catch(reject);
@@ -3692,22 +3858,49 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
             const transaction = db.transaction(['pendingPurchases'], 'readwrite');
             const objectStore = transaction.objectStore('pendingPurchases');
 
-            const updateRecord = {
-                ...updatedData,
-                type: `${type}_update`, // Mark as update operation
-                timestamp: new Date().toISOString(),
-                status: 'pending'
+            const transactionId = updatedData.transactionId || updatedData.id;
+            
+            // First check if the record already exists in pending store
+            const getRequest = objectStore.get(transactionId);
+            
+            getRequest.onsuccess = function() {
+                const existingRecord = getRequest.result;
+                let recordToSave;
+                
+                if (existingRecord) {
+                    // Update existing record, preserving its original type if it's a new transaction
+                    // (type 'transfer' or 'daily-in'). This ensures it's still treated as a new
+                    // record by the sync process rather than an update to an existing server record.
+                    recordToSave = {
+                        ...existingRecord,
+                        ...updatedData,
+                        type: (existingRecord.type === 'transfer' || existingRecord.type === 'daily-in') 
+                            ? existingRecord.type 
+                            : `${type}_update`,
+                        timestamp: new Date().toISOString(),
+                        status: 'pending'
+                    };
+                } else {
+                    recordToSave = {
+                        ...updatedData,
+                        type: `${type}_update`, // Mark as update operation
+                        timestamp: new Date().toISOString(),
+                        status: 'pending'
+                    };
+                }
+
+                const request = objectStore.put(recordToSave);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
             };
-
-            const request = objectStore.add(updateRecord);
-
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
+            
+            getRequest.onerror = () => reject(getRequest.error);
         });
     }
 
     // Function to delete a transaction (offline-first)
     async function deleteTransaction(id, type) {
+        console.log(`Starting deletion for ${id} (type: ${type})`);
         if (!confirm('Are you sure you want to delete this transaction?')) {
             return;
         }
@@ -3715,21 +3908,33 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
         try {
             // Immediately queue the deletion in local IndexedDB
             await queueTransactionDeletion(id, type);
+            console.log('Queued deletion request in pendingPurchases');
 
             // Also remove from local pending records if it exists there
             if (db) {
                 await removeLocalTransactionRecord(id, type);
+                console.log('Attempted cleanup of local original records');
             }
 
+            // Reload the UI to reflect changes
+            if (currentTab === 'add') {
+                await loadPurchasedItemsList('', true);
+            } else if (currentTab === 'transfer') {
+                await loadTransferTransactions('', true);
+            } else if (currentTab === 'dashboard') {
+                await loadDailyInTransactions(true);
+            } else {
+                loadTab(currentTab, true);
+            }
+            console.log('UI reload triggered');
+
             alert('Transaction deleted locally!');
-            // Reload the current tab to reflect changes
-            loadTab(currentTab);
 
             // If online, try to sync deletion to server in the background
             if (navigator.onLine) {
                 try {
                     let endpoint = '';
-                    if (type === 'daily-in') {
+                    if (type === 'purchase' || type === 'daily-in') {
                         endpoint = `/api/purchases/${id}`;
                     } else if (type === 'transfer') {
                         endpoint = `/api/transfers/${id}`;
@@ -3771,7 +3976,7 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
                 status: 'pending'
             };
 
-            const request = objectStore.add(deletionRecord);
+            const request = objectStore.put(deletionRecord);
 
             request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error);
