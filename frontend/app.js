@@ -199,6 +199,15 @@ class OfflineDataManager {
 
     // Combined function to process all queued operations
     async processQueuedOperations() {
+        // Use the consolidated sync function if available
+        if (typeof window.syncPendingTransactions === 'function') {
+            const result = await window.syncPendingTransactions();
+            return {
+                ...result,
+                success: result.success
+            };
+        }
+
         const purchaseResult = await this.processQueuedPurchases();
         const transferResult = await this.processQueuedTransfers();
         const deletionResult = await this.processQueuedDeletions();
@@ -1055,14 +1064,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 console.log('Purchases and transfers synced from Google Sheets on page load');
             }
 
-            if (itemCount === 0) {
-                // If no data, attempt to sync from Google Sheets if online
-                if (navigator.onLine) {
-                    await syncWithGoogleSheets();
-                    await updateLastSyncTime();
-                } else {
-                    console.warn('No data available and device is offline');
-                }
+            // Sync items if empty or if data is stale (older than 1 hour)
+            const lastSync = await getLastSyncTime();
+            const oneHour = 1 * 60 * 60 * 1000;
+            const isStale = !lastSync || (new Date() - new Date(lastSync)) > oneHour;
+
+            if (navigator.onLine && (itemCount === 0 || isStale)) {
+                console.log('Syncing all items from Google Sheets...');
+                await syncWithGoogleSheets();
+                await updateLastSyncTime();
+            } else if (itemCount === 0 && !navigator.onLine) {
+                console.warn('No data available and device is offline');
             }
         } catch (error) {
             console.error('Failed to initialize and load data:', error);
@@ -2282,66 +2294,83 @@ document.addEventListener('DOMContentLoaded', function() {
             for (const transaction of pendingTransactions) {
                 try {
                     let response;
-                    
-                    if (transaction.action === 'add') {
-                        response = await fetch('/api/purchases', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(transaction.purchaseData)
-                        });
-                        
-                        // Also sync expiry data
-                        if (response.ok) {
-                            await fetch('/api/expiries', {
+                    const type = transaction.type || 'purchase';
+                    const action = transaction.action || (type.includes('_deletion') ? 'delete' : type.includes('_update') ? 'edit' : 'add');
+                    const id = transaction.transactionId || transaction.id;
+
+                    if (type.startsWith('purchase')) {
+                        if (action === 'add') {
+                            response = await fetch('/api/purchases', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(transaction.expiryData)
+                                body: JSON.stringify(transaction.purchaseData)
+                            });
+                            
+                            // Also sync expiry data
+                            if (response.ok) {
+                                await fetch('/api/expiries', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(transaction.expiryData)
+                                });
+                            }
+                        } else if (action === 'edit') {
+                            response = await fetch(`/api/purchases/${id}`, {
+                                method: 'PUT',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(transaction.purchaseData)
+                            });
+                        } else if (action === 'delete') {
+                            response = await fetch(`/api/purchases/${id}`, {
+                                method: 'DELETE'
                             });
                         }
-                    } else if (transaction.action === 'edit') {
-                        response = await fetch(`/api/purchases/${transaction.transactionId}`, {
-                            method: 'PUT',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(transaction.purchaseData)
-                        });
-                    } else if (transaction.action === 'delete') {
-                        response = await fetch(`/api/purchases/${transaction.transactionId}`, {
-                            method: 'DELETE'
-                        });
+                    } else if (type.startsWith('transfer')) {
+                        if (action === 'delete') {
+                            response = await fetch(`/api/transfers/${id}`, {
+                                method: 'DELETE'
+                            });
+                        } else {
+                            response = await fetch('/api/transfers', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(transaction.transferData || transaction)
+                            });
+                        }
                     }
                     
-                    if (response.ok) {
+                    if (response && response.ok) {
                         // Update local synced storage before updating pending status to ensure UI consistency
-                        if (transaction.type === 'purchase') {
-                            if (transaction.action === 'add' || transaction.action === 'edit') {
-                                await saveSyncedPurchase(transaction.purchaseData);
-                            } else if (transaction.action === 'delete') {
-                                await deleteSyncedPurchase(transaction.transactionId);
+                        if (type.startsWith('purchase')) {
+                            if (action === 'add' || action === 'edit') {
+                                await saveSyncedPurchase(transaction.purchaseData || transaction);
+                            } else if (action === 'delete') {
+                                await deleteSyncedPurchase(id);
                             }
-                        } else if (transaction.type === 'transfer') {
-                            if (transaction.action === 'add' || transaction.action === 'edit' || !transaction.action) {
+                        } else if (type.startsWith('transfer')) {
+                            if (action === 'add' || action === 'edit' || action === 'add' || !transaction.action) {
                                 // For transfers, the data is at the top level or in transferData
                                 const transferData = transaction.transferData || transaction;
                                 await saveSyncedTransfer(transferData);
-                            } else if (transaction.action === 'delete') {
-                                await deleteSyncedTransfer(transaction.transactionId);
+                            } else if (action === 'delete') {
+                                await deleteSyncedTransfer(id);
                             }
                         }
 
                         // Mark as synced instead of deleting immediately to avoid gaps
                         // Reconciliation in syncFromGoogleSheets will handle final removal
-                        if (transaction.type === 'purchase') {
-                            await updatePendingPurchaseStatus(transaction.transactionId, 'synced');
-                        } else if (transaction.type === 'transfer') {
-                            await updatePendingTransferStatus(transaction.transactionId, 'synced');
+                        if (type.startsWith('purchase')) {
+                            await updatePendingPurchaseStatus(id, 'synced');
+                        } else if (type.startsWith('transfer')) {
+                            await updatePendingTransferStatus(id, 'synced');
                         }
                         
-                        console.log(`Synced ${transaction.action || 'processed'} ${transaction.type} transaction: ${transaction.transactionId}`);
-                    } else {
-                        console.error(`Failed to sync ${transaction.action} transaction: ${transaction.transactionId}`);
+                        console.log(`Synced ${action} ${type} transaction: ${id}`);
+                    } else if (response) {
+                        console.error(`Failed to sync ${action} ${type} transaction: ${id}`);
                     }
                 } catch (error) {
-                    console.error(`Error syncing transaction ${transaction.transactionId}:`, error);
+                    console.error(`Error syncing transaction ${transaction.transactionId || transaction.id}:`, error);
                 }
             }
             
@@ -2795,7 +2824,7 @@ async function loadLowStockData() {
 
         // Check if the item exists in the database
         const allItems = await getAllItems();
-        const existingItem = allItems.find(item => item.name.toLowerCase() === itemName.toLowerCase());
+        const existingItem = allItems.find(item => item.name.toLowerCase() === itemName.trim().toLowerCase());
 
         let itemCode;
         if (existingItem) {
@@ -3012,8 +3041,14 @@ async function loadLowStockData() {
 
         // Look up the item code based on the name from local storage
         const allItems = await getAllItems();
-        const selectedItem = allItems.find(item => item.name === itemName);
-        const itemCode = selectedItem ? selectedItem.code : itemName; // fallback to name if not found
+        const selectedItem = allItems.find(item => item.name.toLowerCase() === itemName.trim().toLowerCase());
+        
+        if (!selectedItem) {
+            alert('Item not found in database. Please select an item from the suggestions.');
+            return;
+        }
+        
+        const itemCode = selectedItem.code;
 
         // Handle FOC/Clinic/Discard option
         if (direction === 'foc-clinic-discard') {
@@ -3133,14 +3168,9 @@ async function loadLowStockData() {
             // 3. Attempt sync if online (background task)
             if (navigator.onLine) {
                 console.log('Attempting to sync transfer with Google Sheets...');
-                // We use the existing processQueuedTransfers from offlineManager
                 if (window.offlineManager) {
-                    window.offlineManager.processQueuedTransfers().then(result => {
-                        if (result && result.success) {
-                            console.log('Transfer sync successful');
-                        } else {
-                            console.log('Transfer sync failed, will retry later');
-                        }
+                    window.offlineManager.processQueuedOperations().then(result => {
+                        console.log('Transfer sync background process completed');
                     }).catch(err => {
                         console.error('Background transfer sync error:', err);
                     });

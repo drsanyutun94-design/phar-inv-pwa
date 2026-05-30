@@ -279,6 +279,20 @@ app.post('/api/purchases', async (req, res) => {
 
     const range = 'daily in!A:P'; // A=Transaction ID, B=Purchase Date, C=Supplier, D=Item Code, E=Item Name, F=Total Price, G=Units per Card, H=Cards per Box, I=Number of Boxes, J=Expiry Date, K=Payment1 Amount, L=Payment1 Type, M=Payment2 Amount, N=Payment2 Type, O=Payment3 Amount, P=Payment3 Type
 
+    // Check for duplicate transactionId before appending
+    const checkRange = 'daily in!A:A';
+    const checkResponse = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: checkRange,
+    });
+    const existingIds = checkResponse.data.values || [];
+    const isDuplicate = existingIds.some(row => row[0] === transactionId);
+
+    if (isDuplicate) {
+      console.log(`Duplicate purchase transactionId detected: ${transactionId}. Skipping save.`);
+      return res.status(200).json({ message: 'Purchase already exists', transactionId });
+    }
+
     const values = [[
       transactionId,
       purchaseDate,
@@ -676,6 +690,22 @@ app.post('/api/transfers', async (req, res) => {
     }
 
     const range = 'Transfer!A:G'; 
+
+    // Check for duplicate transactionId before appending
+    // finalTransactionId starts with ' to force string in Google Sheets, but we check against the raw ID
+    const rawId = finalTransactionId.startsWith("'") ? finalTransactionId.substring(1) : finalTransactionId;
+    const checkRange = 'Transfer!A:A';
+    const checkResponse = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: checkRange,
+    });
+    const existingIds = checkResponse.data.values || [];
+    const isDuplicate = existingIds.some(row => row[0] === rawId);
+
+    if (isDuplicate) {
+      console.log(`Duplicate transfer transactionId detected: ${rawId}. Skipping save.`);
+      return res.status(200).json({ message: 'Transfer already exists', transactionId: rawId });
+    }
 
     const values = [[finalTransactionId, date, itemCode, itemName, quantity, direction, reason || '']];
 
