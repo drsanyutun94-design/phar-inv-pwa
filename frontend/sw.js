@@ -4,7 +4,9 @@ const urlsToCache = [
   '/index.html',
   '/styles.css',
   '/app.js',
-  '/manifest.json'
+  '/manifest.json',
+  '/ext-lib/JsBarcode.all.min.js',
+  '/ext-lib/html5-qrcode.min.js'
 ];
 
 // Cache static assets during installation
