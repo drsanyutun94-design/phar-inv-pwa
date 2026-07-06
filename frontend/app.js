@@ -4360,65 +4360,26 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
     };
 
     window.printBarcodeLabels = async function(code, name, unit) {
-        // ─── Try Bluetooth / Serial first ────────────────────────────
-        if (navigator.serial) {
-            const raster = renderLabelToRaster(code, name, unit);
-            const cmd = getRasterCommand(raster);
-            try {
-                const port = await navigator.serial.requestPort();
-                await port.open({ baudRate: 9600 });
-                const writer = port.writable.getWriter();
-                await writer.write(cmd);
-                writer.releaseLock();
-                await port.close();
-                return;
-            } catch (err) {
-                if (err.name !== 'NotFoundError') {
-                    console.error('Serial error:', err);
-                    alert('Serial print failed: ' + err.message);
-                }
-                // NotFoundError = no device or cancelled → fall through
-            }
-        }
-
-        // ─── Fallback: System print dialog ───────────────────────────
-        const printWindow = window.open('', '_blank', 'width=200,height=300');
-        if (!printWindow) {
-            alert('Please allow pop-ups to print barcode labels.');
+        if (!navigator.serial) {
+            alert('Web Serial API not supported.\n\nUse Chrome on Desktop/Android.\nPair your thermal printer in Bluetooth settings first.');
             return;
         }
 
-        const svgContent = generateBarcodeSvg(code);
-
-        printWindow.document.write(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Print Barcode Label</title>
-                <style>
-                    @page { size: 40mm 30mm; margin: 0; }
-                    body { margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; width: 40mm; height: 30mm; box-sizing: border-box; }
-                    .label { width: 40mm; height: 30mm; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2mm; box-sizing: border-box; text-align: center; font-family: Arial, sans-serif; }
-                    .label-name { font-size: 10px; font-weight: 600; line-height: 1.2; max-height: 28px; overflow: hidden; word-break: break-word; width: 100%; }
-                    .label-unit { font-size: 9px; color: #555; margin-top: 2px; }
-                    .label-barcode { max-width: 100%; margin: 2px 0; }
-                    .label-code { font-size: 8px; color: #333; letter-spacing: 0.5px; word-break: break-all; }
-                </style>
-            </head>
-            <body>
-                <div class="label">
-                    <div class="label-name">${name}</div>
-                    <div class="label-unit">${unit}</div>
-                    <div class="label-barcode">${svgContent}</div>
-                    <div class="label-code">${code}</div>
-                </div>
-                <script>
-                    window.onload = function() { window.print(); window.close(); }
-                <\/script>
-            </body>
-            </html>
-        `);
-        printWindow.document.close();
+        const raster = renderLabelToRaster(code, name, unit);
+        const cmd = getRasterCommand(raster);
+        try {
+            const port = await navigator.serial.requestPort();
+            await port.open({ baudRate: 9600 });
+            const writer = port.writable.getWriter();
+            await writer.write(cmd);
+            writer.releaseLock();
+            await port.close();
+        } catch (err) {
+            if (err.name !== 'NotFoundError') {
+                console.error('Serial error:', err);
+                alert('Serial print failed: ' + err.message);
+            }
+        }
     };
 
     // ─── Text wrapping helper for label rendering ────────────────────────
@@ -4569,9 +4530,6 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
                 'Use Chrome on Desktop/Android.\n' +
                 'Pair YCP-806 in Bluetooth settings first.');
         }
-
-        // Fallback: System print dialog
-        printBarcodeLabel(code, name, unit);
     };
 
     window.printAllBarcodeLabels = function() {
