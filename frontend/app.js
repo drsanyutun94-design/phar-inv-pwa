@@ -4377,7 +4377,7 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
                     console.error('Serial error:', err);
                     alert('Serial print failed: ' + err.message);
                 }
-                // NotFoundError = user cancelled → fall through to system print
+                // NotFoundError = no device or cancelled → fall through
             }
         }
 
