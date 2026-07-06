@@ -17,5 +17,8 @@
   "license": "MIT",
   "devDependencies": {
     "serve": "^14.2.1"
+  },
+  "dependencies": {
+    "jsbarcode": "^3.12.3"
   }
 }

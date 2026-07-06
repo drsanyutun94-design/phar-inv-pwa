@@ -122,7 +122,7 @@ app.get('/api/items', async (req, res) => {
     
     const items = rows.map(row => ({
       code: row[0],
-      name: row[1],
+      name: row[1] ? row[1].trim() : '',
       unit: row[2]
     }));
     
@@ -152,7 +152,7 @@ app.get('/api/items/search/:query', async (req, res) => {
       .filter(row => row[1] && row[1].toLowerCase().includes(query)) // Filter by name in column B
       .map(row => ({
         code: row[0],           // Column A: Item Code
-        name: row[1],           // Column B: Item Name
+        name: row[1] ? row[1].trim() : '',           // Column B: Item Name
         mainStore: row[2] ? parseInt(row[2]) : 0,  // Column C: Main Store Quantity
         subStore: row[3] ? parseInt(row[3]) : 0,   // Column D: Sub Store Quantity
         unit: row[4]            // Column E: Unit
@@ -240,7 +240,12 @@ app.get('/api/purchases', async (req, res) => {
     res.json(purchases);
   } catch (error) {
     console.error('Error fetching purchases:', error);
-    res.status(500).json({ error: 'Failed to fetch purchases', details: error.message });
+    let statusCode = 500;
+    let message = 'Failed to fetch purchases';
+    if (error.message.includes('ETIMEDOUT') || error.message.includes('ENOTFOUND')) {
+      message = 'Could not connect to Google APIs. Please check server internet connection.';
+    }
+    res.status(statusCode).json({ error: message, details: error.message });
   }
 });
 
@@ -893,7 +898,7 @@ app.get('/api/stock', async (req, res) => {
 
     const stock = rows.map(row => ({
       code: row[0],           // Column A: Item Code
-      name: row[1],           // Column B: Item Name
+      name: row[1] ? row[1].trim() : '',           // Column B: Item Name
       mainStore: row[2] ? parseInt(row[2]) : 0,  // Column C: Main Store Quantity
       subStore: row[3] ? parseInt(row[3]) : 0,   // Column D: Sub Store Quantity
       unit: row[4]            // Column E: Unit
@@ -902,9 +907,11 @@ app.get('/api/stock', async (req, res) => {
     res.json(stock);
   } catch (error) {
     console.error('Error fetching stock:', error);
-    console.error('Spreadsheet ID:', SPREADSHEET_ID);
-    console.error('Google auth error:', error.message);
-    res.status(500).json({ error: 'Failed to fetch stock', details: error.message });
+    let message = 'Failed to fetch stock';
+    if (error.message.includes('ETIMEDOUT') || error.message.includes('ENOTFOUND')) {
+      message = 'Could not connect to Google APIs. Please check server internet connection.';
+    }
+    res.status(500).json({ error: message, details: error.message });
   }
 });
 

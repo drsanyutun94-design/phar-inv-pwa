@@ -1690,8 +1690,11 @@ document.addEventListener('DOMContentLoaded', function() {
     function loadSearchTab() {
         mainContent.innerHTML = `
             <div class="search-container">
-                <input type="text" class="search-input" id="search-input" placeholder="Search for medicines...">
-                <span class="material-icons search-icon">search</span>
+                <input type="text" class="search-input" id="search-input" placeholder="Search for medicines..." style="padding-right:80px;">
+                <span class="material-icons search-icon" style="right:48px;">search</span>
+                <button class="scanner-btn-icon" onclick="openBarcodeScanner('search-input')" title="Scan barcode with camera">
+                    <span class="material-icons">camera_alt</span>
+                </button>
             </div>
 
             <div id="search-results">
@@ -1703,6 +1706,138 @@ document.addEventListener('DOMContentLoaded', function() {
         const searchInput = document.getElementById('search-input');
         searchInput.addEventListener('input', debounce(handleSearch, 300));
     }
+
+    function startScanner(onDetected) {
+        const existing = document.getElementById('scanner-container');
+        if (existing) stopScanner();
+
+        const container = document.createElement('div');
+        container.id = 'scanner-container';
+        container.innerHTML = `
+            <video id="scanner-video" style="width:100%;max-width:500px;border-radius:8px;background:#000;"></video>
+            <button class="scanner-close-btn" onclick="closeBarcodeScanner()">Close Scanner</button>
+        `;
+        document.body.appendChild(container);
+
+        const video = document.getElementById('scanner-video');
+
+        // ─── Native BarcodeDetector API ──────────────────────────
+        if ('BarcodeDetector' in window) {
+            window._scannerActive = true;
+
+            const barcodeDetector = new BarcodeDetector({
+                formats: ['code_128', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'codabar', 'code_39', 'code_93', 'itf', 'qr_code', 'data_matrix', 'aztec', 'pdf417']
+            });
+
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: 640, height: 480 } })
+                .then(stream => {
+                    window._scannerStream = stream;
+                    video.srcObject = stream;
+                    video.setAttribute('playsinline', '');
+                    video.play();
+
+                    async function detectFrame() {
+                        if (!window._scannerActive) return;
+                        try {
+                            const barcodes = await barcodeDetector.detect(video);
+                            if (barcodes.length > 0) {
+                                stopScanner();
+                                onDetected(barcodes[0].rawValue);
+                                return;
+                            }
+                        } catch (e) {
+                            // detection error, continue
+                        }
+                        if (window._scannerActive) {
+                            requestAnimationFrame(detectFrame);
+                        }
+                    }
+                    video.addEventListener('play', () => {
+                        detectFrame();
+                    });
+                })
+                .catch(err => {
+                    console.error('Camera error:', err);
+                    alert('Could not access camera. ' + err.message);
+                    stopScanner();
+                });
+            return;
+        }
+
+        // ─── Fallback: html5-qrcode ──────────────────────────────
+        if (typeof Html5Qrcode !== 'undefined') {
+            const readerDiv = document.createElement('div');
+            readerDiv.id = 'reader';
+            readerDiv.style.cssText = 'width:100%;max-width:500px;background:#000;border-radius:8px;overflow:hidden;';
+            container.insertBefore(readerDiv, container.firstChild);
+            video.remove();
+
+            const html5Scanner = new Html5Qrcode('reader');
+            window._html5Scanner = html5Scanner;
+            html5Scanner.start(
+                { facingMode: 'environment' },
+                { fps: 10, qrbox: { width: 250, height: 150 } },
+                decodedText => { stopScanner(); onDetected(decodedText); },
+                () => {}
+            ).catch(err => {
+                console.error('Camera error:', err);
+                alert('Could not access camera. ' + err.message);
+                stopScanner();
+            });
+        } else {
+            alert('Camera scanner not supported.\n\nUse Chrome on Desktop/Android.');
+            stopScanner();
+        }
+    }
+
+    function stopScanner() {
+        window._scannerActive = false;
+        if (window._scannerStream) {
+            window._scannerStream.getTracks().forEach(t => t.stop());
+            window._scannerStream = null;
+        }
+        if (window._html5Scanner) {
+            try {
+                window._html5Scanner.stop().then(() => {
+                    window._html5Scanner.clear();
+                    window._html5Scanner = null;
+                }).catch(() => {});
+            } catch (e) {}
+        }
+        const container = document.getElementById('scanner-container');
+        if (container) container.remove();
+    }
+
+    window.openBarcodeScanner = function(inputId) {
+        startScanner(decodedText => {
+            const target = inputId || 'search-input';
+            const input = document.getElementById(target);
+            if (input) {
+                input.value = decodedText;
+                input.dispatchEvent(new Event('input'));
+            }
+        });
+    };
+
+    window.openBarcodeScannerForItem = function(inputId) {
+        startScanner(async decodedText => {
+            const input = document.getElementById(inputId);
+            if (input) {
+                try {
+                    const allItems = await getAllItems();
+                    const match = allItems.find(i => i.code === decodedText);
+                    input.value = match ? match.name : decodedText;
+                } catch (e) {
+                    input.value = decodedText;
+                }
+                input.dispatchEvent(new Event('input'));
+            }
+        });
+    };
+
+    window.closeBarcodeScanner = function() {
+        stopScanner();
+    };
 
     async function handleSearch(event) {
         const query = event.target.value.trim();
@@ -1746,9 +1881,10 @@ document.addEventListener('DOMContentLoaded', function() {
             let resultsHtml = '<ul class="item-list">';
             items.forEach(item => {
                 resultsHtml += `
-                    <li data-code="${item.code}">
+                    <li data-code="${item.code}" data-name="${item.name}" data-unit="${item.unit}">
                         <div class="item-name">${item.name}</div>
                         <div class="item-details">Code: ${item.code} | Sub: ${item.subStore || 0} | Main: ${item.mainStore || 0} | Unit: ${item.unit}</div>
+                        <button class="btn-print" onclick="event.stopPropagation(); printBarcodeLabels('${item.code}','${item.name.replace(/'/g, "\\'")}','${item.unit}')" style="margin-top:6px;"><span class="material-icons" style="font-size:14px;">print</span> Barcode</button>
                     </li>
                 `;
             });
@@ -1782,7 +1918,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 <form id="add-item-form">
                     <div class="input-group">
                         <label for="select-item">Select Item</label>
-                        <input type="text" id="select-item" class="search-input" placeholder="Type item name..." required>
+                        <div style="position:relative;">
+                            <input type="text" id="select-item" class="search-input" placeholder="Type item name..." required>
+                            <button type="button" class="scanner-btn-icon" onclick="openBarcodeScannerForItem('select-item')" title="Scan barcode with camera">
+                                <span class="material-icons">camera_alt</span>
+                            </button>
+                        </div>
                         <div id="item-suggestions" class="suggestions-dropdown hidden"></div>
                     </div>
 
@@ -2034,9 +2175,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 const dateB = new Date(b.purchaseDate || b.date);
                 return dateB - dateA;
             });
+
+            // Build item code to unit mapping for barcode printing
+            let itemUnitMap = {};
+            try {
+                const allItems = await getAllItems();
+                if (allItems) allItems.forEach(item => itemUnitMap[item.code] = item.unit || '');
+            } catch (e) {
+                console.warn('Could not load items for barcode unit lookup:', e);
+            }
             
             let transactionsHtml = '<table class="transaction-table"><thead><tr><th>Purchase Date</th><th>Medicine Name</th><th>Total Amount</th><th>Total Units</th><th>Expired Date</th><th>Actions</th></tr></thead><tbody>';
-            
+
             transactions.forEach(transaction => {
                 const purchaseDate = transaction.purchaseDate || transaction.date || 'N/A';
                 const itemName = transaction.itemName || transaction.name || 'N/A';
@@ -2045,6 +2195,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 const totalUnits = transaction.packageScheme ? 
                     (transaction.packageScheme.numberOfBoxes || 0) * (transaction.packageScheme.cardsPerBox || 0) * (transaction.packageScheme.unitsPerCard || 0) : 
                     transaction.quantity || 'N/A';
+                const itemCode = transaction.itemCode || '';
+                const unit = itemUnitMap[itemCode] || '';
                 
                 transactionsHtml += `
                     <tr data-id="${transaction.transactionId || transaction.id || ''}" data-type="purchase" class="${transaction.isPending ? 'pending-row' : ''}">
@@ -2054,8 +2206,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         <td>${totalUnits}</td>
                         <td>${expiredDate}</td>
                         <td>
-                            <button class="btn-edit" onclick="editPurchaseTransaction('${transaction.transactionId || transaction.id || ''}')">Edit</button>
-                            <button class="btn-delete" onclick="deletePurchaseTransaction('${transaction.transactionId || transaction.id || ''}')">Delete</button>
+                            <button class="btn-edit" onclick="editPurchaseTransaction('${transaction.transactionId || transaction.id || ''}')"><span class="material-icons" style="font-size:14px;">edit</span> Edit</button>
+                            <button class="btn-print" onclick="printBarcodeLabels('${itemCode}','${itemName.replace(/'/g, "\\'")}','${unit}')"><span class="material-icons" style="font-size:14px;">print</span> Barcode</button>
+                            <button class="btn-delete" onclick="deletePurchaseTransaction('${transaction.transactionId || transaction.id || ''}')"><span class="material-icons" style="font-size:14px;">delete</span> Delete</button>
                         </td>
                     </tr>
                 `;
@@ -2393,7 +2546,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 <form id="transfer-form">
                     <div class="input-group">
                         <label for="transfer-item-search">Search Item</label>
-                        <input type="text" id="transfer-item-search" class="search-input" placeholder="Search for item..." required>
+                        <div style="position:relative;">
+                            <input type="text" id="transfer-item-search" class="search-input" placeholder="Search for item..." required>
+                            <button type="button" class="scanner-btn-icon" onclick="openBarcodeScannerForItem('transfer-item-search')" title="Scan barcode with camera">
+                                <span class="material-icons">camera_alt</span>
+                            </button>
+                        </div>
                         <div id="transfer-item-suggestions" class="suggestions-dropdown hidden"></div>
                     </div>
 
@@ -4085,6 +4243,371 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
         });
     }
 
+    // ─── Barcode Label Generation & Printing ────────────────────────────
+
+    window.showBarcodeLabel = function(code, name, unit) {
+        const container = document.getElementById('barcode-label-modal');
+        if (container) container.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'barcode-label-modal';
+        modal.className = 'modal';
+        modal.style.display = 'block';
+        modal.innerHTML = `
+            <div class="modal-content" style="max-width:400px;">
+                <div class="modal-header">
+                    <h3 class="modal-title">Barcode Label</h3>
+                    <span class="close-modal" onclick="this.closest('.modal').remove()">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <div id="barcode-label-preview" class="barcode-label-container">
+                        <div class="barcode-label" id="single-barcode-label">
+                            <div class="label-item-name">${name}</div>
+                            <div class="label-unit">${unit}</div>
+                            <svg id="barcode-svg" style="max-width:90%;height:auto;"></svg>
+                            <div class="label-code-text">${code}</div>
+                        </div>
+                    </div>
+                    <div class="barcode-actions">
+                        <button class="scanner-btn scanner-btn-primary" onclick="printBarcodeLabel('${code}','${name.replace(/'/g, "\\'")}','${unit}')" style="padding:10px 20px;font-size:15px;">
+                            <span class="material-icons" style="font-size:20px;">print</span> Print Label
+                        </button>
+                        <button class="scanner-btn scanner-btn-success" onclick="printBarcodeLabelBluetooth('${code}','${name.replace(/'/g, "\\'")}','${unit}')" title="Pair YCP-806 in system settings first">
+                            <span class="material-icons" style="font-size:18px;">bluetooth</span> BT
+                        </button>
+                        <button class="scanner-btn scanner-btn-secondary" onclick="this.closest('.modal').remove()" style="background:#757575;color:white;">
+                            Close
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        try {
+            JsBarcode('#barcode-svg', code, {
+                format: 'CODE128',
+                width: 1.5,
+                height: 40,
+                displayValue: false,
+                margin: 2,
+                background: '#ffffff'
+            });
+        } catch (e) {
+            console.error('Barcode generation error:', e);
+        }
+    };
+
+    function generateBarcodeSvg(code) {
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('id', 'temp-barcode');
+        try {
+            JsBarcode(svg, code, {
+                format: 'CODE128',
+                width: 1.5,
+                height: 40,
+                displayValue: false,
+                margin: 2,
+                background: '#ffffff'
+            });
+            return svg.outerHTML;
+        } catch (e) {
+            console.error('Barcode SVG error:', e);
+            return '';
+        }
+    }
+
+    window.printBarcodeLabel = function(code, name, unit) {
+        const printWindow = window.open('', '_blank', 'width=200,height=300');
+        if (!printWindow) {
+            alert('Please allow pop-ups to print barcode labels.');
+            return;
+        }
+
+        const svgContent = generateBarcodeSvg(code);
+
+        printWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Print Barcode Label</title>
+                <style>
+                    @page { size: 40mm 30mm; margin: 0; }
+                    body { margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; width: 40mm; height: 30mm; box-sizing: border-box; }
+                    .label { width: 40mm; height: 30mm; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2mm; box-sizing: border-box; text-align: center; font-family: Arial, sans-serif; }
+                    .label-name { font-size: 10px; font-weight: 600; line-height: 1.2; max-height: 28px; overflow: hidden; word-break: break-word; width: 100%; }
+                    .label-unit { font-size: 9px; color: #555; margin-top: 2px; }
+                    .label-barcode { max-width: 100%; margin: 2px 0; }
+                    .label-code { font-size: 8px; color: #333; letter-spacing: 0.5px; word-break: break-all; }
+                </style>
+            </head>
+            <body>
+                <div class="label">
+                    <div class="label-name">${name}</div>
+                    <div class="label-unit">${unit}</div>
+                    <div class="label-barcode">${svgContent}</div>
+                    <div class="label-code">${code}</div>
+                </div>
+                <script>
+                    window.onload = function() { window.print(); window.close(); }
+                <\/script>
+            </body>
+            </html>
+        `);
+        printWindow.document.close();
+    };
+
+    window.printBarcodeLabels = async function(code, name, unit) {
+        if (!navigator.serial) {
+            alert('Web Serial API not supported.\n\nUse Chrome on Desktop/Android.\nPair your thermal printer in Bluetooth settings first.');
+            return;
+        }
+
+        const raster = renderLabelToRaster(code, name, unit);
+        const cmd = getRasterCommand(raster);
+        try {
+            const port = await navigator.serial.requestPort();
+            await port.open({ baudRate: 9600 });
+            const writer = port.writable.getWriter();
+            await writer.write(cmd);
+            writer.releaseLock();
+            await port.close();
+        } catch (err) {
+            if (err.name !== 'NotFoundError') {
+                console.error('Serial error:', err);
+                alert('Serial print failed: ' + err.message);
+            }
+        }
+    };
+
+    // ─── Text wrapping helper for label rendering ────────────────────────
+
+    function wrapText(ctx, text, maxWidth) {
+        if (!text) return [''];
+        const chars = text.split('');
+        const lines = [];
+        let current = '';
+        for (const ch of chars) {
+            const test = current + ch;
+            if (ctx.measureText(test).width > maxWidth && current) {
+                lines.push(current);
+                current = ch;
+            } else {
+                current = test;
+            }
+        }
+        if (current) lines.push(current);
+        return lines.length ? lines : [text];
+    }
+
+    // ─── Bluetooth BLE + Serial Printer (YCP-806 / generic ESC/POS) ─────
+
+    function renderLabelToRaster(code, name, unit) {
+        const stickerMmW = 40;
+        const stickerMmH = 30;
+        const dpi = 203;
+        const dotsPerMm = dpi / 25.4;
+        const printerW = Math.round(stickerMmW * dotsPerMm);
+        const printerH = Math.round(stickerMmH * dotsPerMm);
+        const scale = 4;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = printerW * scale;
+        canvas.height = printerH * scale;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        const pad = 8 * scale;
+        const availW = canvas.width - pad * 2;
+        const drawX = canvas.width / 2;
+        ctx.fillStyle = '#000000';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+
+        let y = pad;
+        ctx.font = 'bold ' + (30 * scale) + 'px Arial, sans-serif';
+        const nameLines = wrapText(ctx, name, availW);
+        const nameLineH = 36 * scale;
+        for (const line of nameLines) {
+            ctx.fillText(line, drawX, y);
+            y += nameLineH;
+        }
+
+        y += 3 * scale;
+        ctx.font = 'bold ' + (22 * scale) + 'px Arial, sans-serif';
+        ctx.fillText(unit, drawX, y);
+        y += 28 * scale;
+
+        y += 2 * scale;
+        if (typeof JsBarcode !== 'undefined') {
+            const barcodeMmW = 36;
+            const barcodeH = Math.max(canvas.height - y - pad * 2, 60 * scale);
+            const barcodeTargetW = Math.round(barcodeMmW * dotsPerMm * scale);
+            const barcodeCanvas = document.createElement('canvas');
+            JsBarcode(barcodeCanvas, code, {
+                format: 'CODE128',
+                width: 2.5 * scale,
+                height: Math.round(barcodeH * 1.5),
+                displayValue: true,
+                fontSize: 12 * scale,
+                margin: 5 * scale
+            });
+            const bx = (canvas.width - barcodeTargetW) / 2;
+            ctx.drawImage(barcodeCanvas, bx, y, barcodeTargetW, barcodeH);
+        }
+
+        const printerCanvas = document.createElement('canvas');
+        printerCanvas.width = printerW;
+        printerCanvas.height = printerH;
+        const printerCtx = printerCanvas.getContext('2d');
+        printerCtx.imageSmoothingEnabled = true;
+        printerCtx.imageSmoothingQuality = 'high';
+        printerCtx.drawImage(canvas, 0, 0, printerW, printerH);
+
+        const imageData = printerCtx.getImageData(0, 0, printerW, printerH);
+        const pixels = imageData.data;
+        const bytesPerRow = Math.ceil(printerW / 8);
+        const imageBytes = new Uint8Array(bytesPerRow * printerH);
+
+        for (let y2 = 0; y2 < printerH; y2++) {
+            for (let x = 0; x < printerW; x++) {
+                const idx = (y2 * printerW + x) * 4;
+                const gray = 0.299 * pixels[idx] + 0.587 * pixels[idx + 1] + 0.114 * pixels[idx + 2];
+                if (gray < 128) {
+                    const byteIdx = y2 * bytesPerRow + (x >> 3);
+                    const bitIdx = 7 - (x & 7);
+                    imageBytes[byteIdx] |= (1 << bitIdx);
+                }
+            }
+        }
+
+        return { width: printerW, height: printerH, bytesPerRow, imageBytes };
+    }
+
+    function getRasterCommand(raster) {
+        const header = new Uint8Array([
+            0x1D, 0x76, 0x30, 0,
+            raster.bytesPerRow & 0xFF, (raster.bytesPerRow >> 8) & 0xFF,
+            raster.height & 0xFF, (raster.height >> 8) & 0xFF
+        ]);
+        const gapFeed = new Uint8Array([0x1D, 0x0C]);
+        const result = [];
+        result.push(...Array.from(gapFeed));
+        result.push(...Array.from(gapFeed));
+        result.push(...Array.from(header));
+        for (let i = 0; i < raster.imageBytes.length; i += 100) {
+            result.push(...Array.from(raster.imageBytes.subarray(i, i + 100)));
+        }
+        result.push(...Array.from(gapFeed));
+        return new Uint8Array(result);
+    }
+
+    window.printBarcodeLabelBluetooth = async function(code, name, unit) {
+        const raster = renderLabelToRaster(code, name, unit);
+
+        if (navigator.serial) {
+            try {
+                const port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 9600 });
+                const writer = port.writable.getWriter();
+                const cmd = getRasterCommand(raster);
+                await writer.write(cmd);
+                writer.releaseLock();
+                await port.close();
+                document.getElementById('barcode-label-modal')?.remove();
+                return;
+            } catch (err) {
+                if (err.name !== 'NotFoundError') {
+                    console.error('Serial error:', err);
+                    alert('Serial print failed: ' + err.message);
+                }
+            }
+        } else {
+            alert('Web Serial API not supported.\n\n' +
+                'Use Chrome on Desktop/Android.\n' +
+                'Pair YCP-806 in Bluetooth settings first.');
+        }
+
+        // Fallback: System print dialog
+        printBarcodeLabel(code, name, unit);
+    };
+
+    window.printAllBarcodeLabels = function() {
+        const items = document.querySelectorAll('#search-results .item-list li');
+        if (items.length === 0) {
+            alert('No items to print. Search for items first.');
+            return;
+        }
+
+        const printWindow = window.open('', '_blank', 'width=400,height=600');
+        if (!printWindow) {
+            alert('Please allow pop-ups to print barcode labels.');
+            return;
+        }
+
+        let allLabels = '';
+        items.forEach(item => {
+            const code = item.getAttribute('data-code');
+            const name = item.querySelector('.item-name')?.textContent || code;
+            const details = item.querySelector('.item-details')?.textContent || '';
+            const unitMatch = details.match(/Unit:\s*(\S+)/);
+            const unit = unitMatch ? unitMatch[1] : '';
+            const svgContent = generateBarcodeSvg(code);
+            if (svgContent) {
+                allLabels += `
+                <div class="label">
+                    <div class="label-name">${name}</div>
+                    <div class="label-unit">${unit}</div>
+                    <div class="label-barcode">${svgContent}</div>
+                    <div class="label-code">${code}</div>
+                </div>`;
+            }
+        });
+
+        printWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Print All Barcode Labels</title>
+                <style>
+                    @page { size: 40mm 30mm; margin: 0; }
+                    body { margin: 0; padding: 0; }
+                    .label { width: 40mm; height: 30mm; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2mm; box-sizing: border-box; text-align: center; font-family: Arial, sans-serif; page-break-after: always; }
+                    .label-name { font-size: 10px; font-weight: 600; line-height: 1.2; max-height: 28px; overflow: hidden; word-break: break-word; width: 100%; }
+                    .label-unit { font-size: 9px; color: #555; margin-top: 2px; }
+                    .label-barcode { max-width: 100%; margin: 2px 0; }
+                    .label-code { font-size: 8px; color: #333; letter-spacing: 0.5px; word-break: break-all; }
+                </style>
+            </head>
+            <body>
+                ${allLabels}
+                <script>
+                    window.onload = function() { window.print(); window.close(); }
+                <\/script>
+            </body>
+            </html>
+        `);
+        printWindow.document.close();
+    };
+
+    window.discoverBluetoothPrinter = async function() {
+        if (navigator.serial) {
+            try {
+                const port = await navigator.serial.requestPort();
+                const info = port.getInfo();
+                alert('Printer connected successfully!\n\nUSB Vendor ID: ' + (info.usbVendorId || 'N/A') + '\nUSB Product ID: ' + (info.usbProductId || 'N/A'));
+            } catch (err) {
+                if (err.name !== 'NotFoundError') {
+                    console.error('Discovery error:', err);
+                    alert('Discovery failed: ' + err.message);
+                }
+            }
+        } else {
+            alert('Web Serial API not supported.\n\nUse Chrome on Desktop/Android.\nPair YCP-806 in Bluetooth settings first.');
+        }
+    };
+
     // Expose offlineManager and utility functions globally
 window.offlineManager = offlineManager;
 window.getAllPendingPurchases = getAllPendingPurchases;
@@ -4119,4 +4642,13 @@ window.processQueuedDeletions = processQueuedDeletions;
 window.processQueuedUpdates = processQueuedUpdates;
 window.removeQueuedUpdate = removeQueuedUpdate;
 window.queueTransactionUpdate = queueTransactionUpdate;
+window.printBarcodeLabels = printBarcodeLabels;
+window.printBarcodeLabel = printBarcodeLabel;
+window.printBarcodeLabelBluetooth = printBarcodeLabelBluetooth;
+window.printAllBarcodeLabels = printAllBarcodeLabels;
+window.discoverBluetoothPrinter = discoverBluetoothPrinter;
+window.showBarcodeLabel = showBarcodeLabel;
+window.openBarcodeScanner = openBarcodeScanner;
+window.openBarcodeScannerForItem = openBarcodeScannerForItem;
+window.closeBarcodeScanner = closeBarcodeScanner;
 });
