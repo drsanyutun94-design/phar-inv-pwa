@@ -29,3 +29,6 @@ Thumbs.db
 
 # Secrets
 backend/client_secret_*.json
+
+# Local junction for library files
+frontend/ext-lib/

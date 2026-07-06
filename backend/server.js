@@ -37,9 +37,8 @@ app.use((req, res, next) => {
 // Serve static files from the frontend directory
 app.use(express.static(path.join(__dirname, '../frontend')));
 
-// Serve library files from external TWOK-Clinic-App lib directory
-const externalLibPath = 'C:\\Users\\User\\Desktop\\TWOK-Clinic-App - Copy (2)\\lib';
-app.use('/ext-lib', express.static(externalLibPath));
+// Serve library files from the frontend lib directory
+app.use('/ext-lib', express.static(path.join(__dirname, '../frontend/lib')));
 
 // Google Sheets configuration
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
