@@ -2185,7 +2185,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 console.warn('Could not load items for barcode unit lookup:', e);
             }
             
-            let transactionsHtml = '<table class="transaction-table"><thead><tr><th>Purchase Date</th><th>Medicine Name</th><th>Total Amount</th><th>Total Units</th><th>Expired Date</th><th>Actions</th></tr></thead><tbody>';
+            let transactionsHtml = '<table class="transaction-table"><thead><tr><th>Purchase Date</th><th>Medicine Name</th><th>Total Amount</th><th>Total Units</th><th>Expired Date</th></tr></thead><tbody>';
 
             transactions.forEach(transaction => {
                 const purchaseDate = transaction.purchaseDate || transaction.date || 'N/A';
@@ -2205,7 +2205,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         <td>${totalPrice}</td>
                         <td>${totalUnits}</td>
                         <td>${expiredDate}</td>
-                        <td>
+                    </tr>
+                    <tr class="actions-row" data-parent-id="${transaction.transactionId || transaction.id || ''}">
+                        <td colspan="5">
                             <button class="btn-edit" onclick="editPurchaseTransaction('${transaction.transactionId || transaction.id || ''}')"><span class="material-icons" style="font-size:14px;">edit</span> Edit</button>
                             <button class="btn-print" onclick="printBarcodeLabels('${itemCode}','${itemName.replace(/'/g, "\\'")}','${unit}')"><span class="material-icons" style="font-size:14px;">print</span> Barcode</button>
                             <button class="btn-delete" onclick="deletePurchaseTransaction('${transaction.transactionId || transaction.id || ''}')"><span class="material-icons" style="font-size:14px;">delete</span> Delete</button>

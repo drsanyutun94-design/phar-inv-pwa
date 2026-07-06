@@ -479,8 +479,15 @@ body {
   transform: scale(0.96);
 }
 
-.transaction-table td:last-child {
-  white-space: nowrap;
+.actions-row td {
+  padding: 4px 10px 8px !important;
+  border-bottom: 1px solid #ddd;
+}
+
+.actions-row .btn-edit,
+.actions-row .btn-print,
+.actions-row .btn-delete {
+  margin: 0 4px 0 0;
 }
 
 .btn-edit {
