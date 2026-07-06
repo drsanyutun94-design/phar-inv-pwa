@@ -480,14 +480,17 @@ body {
 }
 
 .actions-row td {
-  padding: 4px 10px 8px !important;
+  padding: 8px 10px 10px !important;
   border-bottom: 1px solid #ddd;
+  text-align: center;
 }
 
 .actions-row .btn-edit,
 .actions-row .btn-print,
 .actions-row .btn-delete {
-  margin: 0 4px 0 0;
+  padding: 8px 16px;
+  font-size: 14px;
+  margin: 0 6px;
 }
 
 .btn-edit {
