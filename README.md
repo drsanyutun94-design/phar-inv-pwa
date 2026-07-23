@@ -45,7 +45,7 @@ npm install
 
 1. Create a Google Spreadsheet with the following sheets:
    - `item list` (columns: A=Item Code, B=Item Name, C=Unit)
-   - `daily in` (columns: A=Transaction ID, B=Purchase Date, C=Supplier, D=Item Code, E=Item Name, F=Total Price, G=Units per Card, H=Cards per Box, I=Number of Boxes, J=Expiry Date, K=Payment1 Amount, L=Payment1 Type, M=Payment2 Amount, N=Payment2 Type, O=Payment3 Amount, P=Payment3 Type)
+   - `daily in` (columns: A=Transaction ID, B=Purchase Date, C=Supplier, D=Item Code, E=Item Name, F=Total Price, G=Units per Card, H=Cards per Box, I=Number of Boxes, J=Expiry Date, K=Payment1 Amount, L=Payment1 Type, M=Payment2 Amount, N=Payment2 Type, O=Payment3 Amount, P=Payment3 Type, Q=Payment4 Amount, R=Payment4 Type, S=Payment5 Amount, T=Payment5 Type)
    - `Inventory stock` (columns: A=Item Code, B=Item Name, C=Main Store Quantity, D=Sub Store Quantity, E=Unit)
    - `Transfer` (columns: A=Date, B=Item Code, C=Item Name, D=Quantity, E=Direction)
    - `Expired Date` (columns: A=Item Code, B=Item Name, C=Expiry Date) - Used for adding expiries

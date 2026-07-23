@@ -200,7 +200,7 @@ app.post('/api/items', async (req, res) => {
 // Get all purchases from "daily in" sheet
 app.get('/api/purchases', async (req, res) => {
   try {
-    const range = 'daily in!A2:P'; // Start from row 2 to skip header, includes payment method columns K, L, M, N, O, P
+    const range = 'daily in!A2:T'; // Start from row 2 to skip header, includes payment method columns K-T
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
       range: range,
@@ -212,9 +212,9 @@ app.get('/api/purchases', async (req, res) => {
     }
 
     const purchases = rows.map(row => {
-      // Collect payment methods from columns K, L, M, N, O, P (amount, type pairs)
+      // Collect payment methods from columns K-T (amount, type pairs)
       const paymentMethods = [];
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 5; i++) {
         const amountIndex = 10 + (i * 2);
         const typeIndex = 11 + (i * 2);
         const amount = row[amountIndex];
@@ -237,7 +237,7 @@ app.get('/api/purchases', async (req, res) => {
           numberOfBoxes: parseInt(row[8]) || 0
         },
         expiryDate: row[9],            // Column J: Expiry Date
-        paymentMethods: paymentMethods // Columns K, L, M, N, O, P: Payment Methods (combined back to "amount by type" format)
+        paymentMethods: paymentMethods // Columns K, L, M, N, O, P, Q, R, S, T: Payment Methods (combined back to "amount by type" format)
       };
     });
     res.json(purchases);
@@ -266,10 +266,10 @@ app.post('/api/purchases', async (req, res) => {
       return res.status(400).json({ error: 'Total price and number of boxes must be positive' });
     }
 
-    // Handle payment methods - parse "amount by method" format and distribute across columns K, L, M, N, O, P
+    // Handle payment methods - parse "amount by method" format and distribute across columns K-T
     const paymentMethodsArray = paymentMethods || [];
     const paymentData = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
       if (paymentMethodsArray[i]) {
         const match = paymentMethodsArray[i].match(/^([\d.]+)\s+by\s+(.+)$/);
         if (match) {
@@ -285,7 +285,7 @@ app.post('/api/purchases', async (req, res) => {
       }
     }
 
-    const range = 'daily in!A:P'; // A=Transaction ID, B=Purchase Date, C=Supplier, D=Item Code, E=Item Name, F=Total Price, G=Units per Card, H=Cards per Box, I=Number of Boxes, J=Expiry Date, K=Payment1 Amount, L=Payment1 Type, M=Payment2 Amount, N=Payment2 Type, O=Payment3 Amount, P=Payment3 Type
+    const range = 'daily in!A:T'; // A=Transaction ID, B=Purchase Date, C=Supplier, D=Item Code, E=Item Name, F=Total Price, G=Units per Card, H=Cards per Box, I=Number of Boxes, J=Expiry Date, K=Payment1 Amount, L=Payment1 Type, M=Payment2 Amount, N=Payment2 Type, O=Payment3 Amount, P=Payment3 Type, Q=Payment4 Amount, R=Payment4 Type, S=Payment5 Amount, T=Payment5 Type
 
     // Check for duplicate transactionId before appending
     const checkRange = 'daily in!A:A';
@@ -461,7 +461,7 @@ app.put('/api/purchases/:transactionId', async (req, res) => {
     }
 
     // Fetch all purchases to find the row with matching transactionId
-    const range = 'daily in!A2:P';
+    const range = 'daily in!A2:T';
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
       range: range,
@@ -485,10 +485,10 @@ app.put('/api/purchases/:transactionId', async (req, res) => {
       return res.status(404).json({ error: 'Purchase not found' });
     }
 
-    // Handle payment methods - parse "amount by method" format and distribute across columns K, L, M, N, O, P
+    // Handle payment methods - parse "amount by method" format and distribute across columns K-T
     const paymentMethodsArray = paymentMethods || [];
     const paymentData = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
       if (paymentMethodsArray[i]) {
         const match = paymentMethodsArray[i].match(/^([\d.]+)\s+by\s+(.+)$/);
         if (match) {
@@ -516,12 +516,12 @@ app.put('/api/purchases/:transactionId', async (req, res) => {
       packageScheme?.cardsPerBox || rows[rowIndex - 2][7] || '',      // Column H: Cards per Box
       packageScheme?.numberOfBoxes || rows[rowIndex - 2][8] || '',    // Column I: Number of Boxes
       expiryDate || rows[rowIndex - 2][9],             // Column J: Expiry Date
-      ...paymentData                                    // Columns K, L, M, N, O, P: Payment Methods (amount, type pairs)
+      ...paymentData                                    // Columns K-T: Payment Methods (amount, type pairs)
     ]];
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `daily in!A${rowIndex}:P${rowIndex}`,
+      range: `daily in!A${rowIndex}:T${rowIndex}`,
       valueInputOption: 'RAW',
       requestBody: {
         values: updateValues
