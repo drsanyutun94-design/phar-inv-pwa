@@ -4255,6 +4255,7 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
         modal.id = 'barcode-label-modal';
         modal.className = 'modal';
         modal.style.display = 'block';
+        const nameFontCss = getLabelFontSize(name).css;
         modal.innerHTML = `
             <div class="modal-content" style="max-width:400px;">
                 <div class="modal-header">
@@ -4264,7 +4265,7 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
                 <div class="modal-body">
                     <div id="barcode-label-preview" class="barcode-label-container">
                         <div class="barcode-label" id="single-barcode-label">
-                            <div class="label-item-name">${name}</div>
+                            <div class="label-item-name" style="font-size:${nameFontCss}px;">${name}</div>
                             <div class="label-unit">${unit}</div>
                             <svg id="barcode-svg" style="max-width:90%;height:auto;"></svg>
                             <div class="label-code-text">${code}</div>
@@ -4327,6 +4328,7 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
         }
 
         const svgContent = generateBarcodeSvg(code);
+        const nameFontCss = getLabelFontSize(name).css;
 
         printWindow.document.write(`
             <!DOCTYPE html>
@@ -4337,7 +4339,7 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
                     @page { size: 40mm 30mm; margin: 0; }
                     body { margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; width: 40mm; height: 30mm; box-sizing: border-box; }
                     .label { width: 40mm; height: 30mm; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2mm; box-sizing: border-box; text-align: center; font-family: Arial, sans-serif; }
-                    .label-name { font-size: 10px; font-weight: 600; line-height: 1.2; max-height: 28px; overflow: hidden; word-break: break-word; width: 100%; }
+                    .label-name { font-size: ${nameFontCss}px; font-weight: 600; line-height: 1.2; max-height: 28px; overflow: hidden; word-break: break-word; width: 100%; }
                     .label-unit { font-size: 9px; color: #555; margin-top: 2px; }
                     .label-barcode { max-width: 100%; margin: 2px 0; }
                     .label-code { font-size: 8px; color: #333; letter-spacing: 0.5px; word-break: break-all; }
@@ -4384,6 +4386,14 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
 
     // ─── Text wrapping helper for label rendering ────────────────────────
 
+    function getLabelFontSize(name) {
+        const len = (name || '').length;
+        if (len <= 10) return { css: 10, raster: 30 };
+        if (len <= 18) return { css: 8, raster: 24 };
+        if (len <= 28) return { css: 7, raster: 20 };
+        return { css: 6, raster: 16 };
+    }
+
     function wrapText(ctx, text, maxWidth) {
         if (!text) return [''];
         const chars = text.split('');
@@ -4428,9 +4438,10 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
         ctx.textBaseline = 'top';
 
         let y = pad;
-        ctx.font = 'bold ' + (30 * scale) + 'px Arial, sans-serif';
+        const nameFontSize = getLabelFontSize(name).raster * scale;
+        ctx.font = 'bold ' + nameFontSize + 'px Arial, sans-serif';
         const nameLines = wrapText(ctx, name, availW);
-        const nameLineH = 36 * scale;
+        const nameLineH = Math.min(36, nameFontSize * 1.2) * scale;
         for (const line of nameLines) {
             ctx.fillText(line, drawX, y);
             y += nameLineH;
@@ -4553,10 +4564,11 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
             const unitMatch = details.match(/Unit:\s*(\S+)/);
             const unit = unitMatch ? unitMatch[1] : '';
             const svgContent = generateBarcodeSvg(code);
+            const nameFontCss = getLabelFontSize(name).css;
             if (svgContent) {
                 allLabels += `
                 <div class="label">
-                    <div class="label-name">${name}</div>
+                    <div class="label-name" style="font-size:${nameFontCss}px;">${name}</div>
                     <div class="label-unit">${unit}</div>
                     <div class="label-barcode">${svgContent}</div>
                     <div class="label-code">${code}</div>
@@ -4573,7 +4585,7 @@ async function handleTransferItemSearch(event, suggestionsDiv) {
                     @page { size: 40mm 30mm; margin: 0; }
                     body { margin: 0; padding: 0; }
                     .label { width: 40mm; height: 30mm; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2mm; box-sizing: border-box; text-align: center; font-family: Arial, sans-serif; page-break-after: always; }
-                    .label-name { font-size: 10px; font-weight: 600; line-height: 1.2; max-height: 28px; overflow: hidden; word-break: break-word; width: 100%; }
+                    .label-name { font-weight: 600; line-height: 1.2; max-height: 28px; overflow: hidden; word-break: break-word; width: 100%; }
                     .label-unit { font-size: 9px; color: #555; margin-top: 2px; }
                     .label-barcode { max-width: 100%; margin: 2px 0; }
                     .label-code { font-size: 8px; color: #333; letter-spacing: 0.5px; word-break: break-all; }
